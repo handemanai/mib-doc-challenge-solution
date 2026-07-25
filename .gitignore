@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.DS_Store
+.pytest_cache/
+.codex-artifacts/
+tests/redteam_corpus/_qr_*.png
+out/
+STRATEGY.md
+ADVERSARIAL_REVIEW.md

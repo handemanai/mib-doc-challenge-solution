@@ -1,0 +1,14 @@
+# The image COPYs only mib/, models/, scripts/predict.py, run_shard.py, run.sh.
+# Keep build context minimal and never ship dev-time tooling, tests, or notes.
+tests/
+tools/
+data/
+out/
+.git/
+__pycache__/
+*.pyc
+.DS_Store
+.pytest_cache/
+STRATEGY.md
+ADVERSARIAL_REVIEW.md
+*.ipynb

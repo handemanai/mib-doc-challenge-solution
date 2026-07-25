@@ -1,0 +1,199 @@
+# MIB Intergalactic Intake — Adjudication Engine
+
+An offline, CPU-only pipeline that reads adversarial PDF case packets, extracts a
+structured applicant record, and recommends `APPROVED` / `DENIED` /
+`NEEDS_REVIEW` — with a calibrated confidence and a per-case evidence ledger
+behind every decision.
+
+This is built as an **auditable adjudication system, not an OCR script**. Every
+decision is reconstructible from the evidence that produced it, approvals are
+gated on positively-read and cross-corroborated evidence, and hidden/injected
+text is treated as a distrust signal that can only ever push *away* from
+approval — never as evidence.
+
+## One-command reproduction
+
+```bash
+# Build and label the exact clean revision (no network needed at run time)
+PRODUCER_SHA="$(git rev-parse HEAD)"
+docker build --label "org.opencontainers.image.revision=$PRODUCER_SHA" \
+  -t "mib-intake:$PRODUCER_SHA" .
+
+# Run under the exact scoring contract: no network, 4 CPU, 8 GiB, read-only root
+docker run --rm --network none --cpus 4 --memory 8g \
+  --read-only --tmpfs /tmp \
+  -v "$PWD/data/validation:/in:ro" -v "$PWD/out:/out" \
+  "mib-intake:$PRODUCER_SHA" /in /out/predictions.jsonl
+```
+
+Add `--ledger /out/ledger.jsonl` after the output path (or set `MIB_LEDGER`) to
+emit the per-case evidence audit trail alongside the predictions. A bound
+candidate evaluation must also pass all three identity arguments:
+
+```bash
+# First create the supervised pre-run identity from the clean checkout, saved
+# image inspection, actual-image runtime manifest, config, and ordered inputs.
+IMAGE_ID="$(docker image inspect --format '{{.Id}}' \
+  "mib-intake:$PRODUCER_SHA")"
+python tools/prepare_native_run_identity.py \
+  --repo . --producer-sha "$PRODUCER_SHA" --image-id "$IMAGE_ID" \
+  --image-inspect evaluation/image-inspect.json \
+  --runtime-manifest evaluation/runtime-manifest.json \
+  --effective-config-json '{"MIB_NATIVE_SCAN_OCR":"1"}' \
+  --input-dir data/train --split dev --partition dev-md5 \
+  --output evaluation/run-identity-dev.json
+
+# The run directory must not exist. The producer creates it exclusively.
+docker run --rm --network none --cpus 4 --memory 8g \
+  --read-only --tmpfs /tmp \
+  -e MIB_NATIVE_SCAN_OCR=1 \
+  -v "$PWD/data/train:/in:ro" -v "$PWD/evaluation:/out" \
+  "$IMAGE_ID" /in /out/run-dev/predictions.jsonl \
+  --ledger /out/run-dev/evidence.jsonl \
+  --run-receipt /out/run-dev/run-receipt.json \
+  --run-identity /out/run-identity-dev.json \
+  --run-split dev
+```
+
+Before workers start, the producer validates the predeclared
+producer/image/runtime identity against its live configuration, split, nonce,
+and ordered input bytes, then exclusively creates the run directory. Workers
+consume the resolved paths hashed at preflight, and the producer re-hashes all
+inputs at completion. It publishes no receipt until the prediction and evidence
+files are closed, durable, and the only two files in that directory. The
+completion receipt is atomically published without clobbering and records their
+exact filenames, sizes, and SHA-256 hashes; its later binding hash supplies
+tamper evidence rather than filesystem immutability.
+`tools/native_artifact_binding.py` re-hashes those artifacts and pins the whole
+verified binding for audit. The saved image inspection and runtime manifest
+remain supplied evidence; capture them from the actual image because these
+Python tools do not themselves query Docker or hash `/app`.
+
+Before any OCR run, `tools/native_selector_census.py` can inspect the same
+identity-bound partition without invoking the recognizer. It binds the clean
+producer commit, the executing selector/census source bytes, the effective
+configuration, and a byte snapshot of every selected PDF; every successfully
+inspected page receives one stable selector outcome and document-open failures
+remain explicit invalid records.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    A[PDF packet] --> B[PDF forensics<br/>PyMuPDF span analysis]
+    B -->|visible spans| C[Native-text read]
+    B -->|hidden spans| H[Mask before raster]
+    H --> D[Trap-masked raster<br/>+ escalation ladder]
+    C --> E[Template parse<br/>+ closed-vocab snap]
+    D -->|RapidOCR ONNX| E
+    E --> F[Evidence pools<br/>rank / score / agreement]
+    F --> G[Deterministic policy engine<br/>+ EV decision layer]
+    G --> I[Calibrated confidence<br/>logistic + isotonic]
+    G --> L[(Evidence ledger)]
+    I --> J[predictions.jsonl]
+    B -. injection signals .-> I
+    B -. never toward APPROVED .-> G
+```
+
+**Five layers**, each documented in `MEMO.md`:
+
+1. **PDF forensics + two physical views** — every text span is classified
+   visible/hidden by render mode, opacity, color, size, and page-crop position.
+   A guarded full-page scan selector can decode the image directly for OCR, so
+   a hostile PDF text bbox can never erase independent scan ink. A parallel
+   composited pass uses its own historical fast/HQ escalation decision and
+   retains the unconditional P0-B rank-1 note authority. Composited/P0-B
+   ordinary evidence that could block approval remains a review-only guard: it
+   can never populate benign output fields, but native evidence loss cannot
+   open a new approval. A native note may add
+   only exactly case-bound signed findings or corrections; its ordinary note
+   fields never cross that authority boundary, the composited payload is never
+   replaced, and conflicting views force review. Native/composited fusion is
+   the production default after passing its sealed holdout gate; setting
+   `MIB_NATIVE_SCAN_OCR=0` remains an explicit control-arm opt-out. PDF text,
+   clipping, masks, optional content, and graphics state remain a separate
+   distrust view. Ambiguous pages use a composited render with hidden spans
+   masked before enhancement.
+2. **Native-scan OCR with a budget-aware escalation ladder** — RapidOCR
+   (PP-OCRv5 mobile ONNX) at a low-resolution fast path; packets
+   still missing deny-relevant fields earn a full-resolution second pass, since
+   the 6 s/PDF budget is an average. Native-text pages bypass OCR. On the sealed
+   201-packet holdout, the full fusion path improved the score from 125.87 to
+   126.09 with zero false approvals and no execution errors. The later
+   human-review hardening pass raised the committed tree's holdout score to
+   126.46 while preserving zero false approvals.
+3. **Template parsing with closed-vocabulary snapping** — every field but
+   dates/IDs snaps to a small legal set; snap margin and cross-page agreement
+   become confidence features. Decoy pages naming a different case ID are
+   ignored; explicit damage markers (`[DATE WASHED OUT]`) are parsed as proof
+   of absence.
+4. **Deterministic policy engine** — the field-manual rules plus rules inferred
+   from labeled examples (Wolf-1061c soft embargo, extra revoked sponsors, an
+   order-statistic staleness epoch that adapts to a regenerated test set).
+   Reproduces 97.3% of training adjudications from true fields with zero
+   APPROVED/DENIED confusions.
+5. **Decision theory + calibrated confidence** — decisions maximize expected
+   value under the scoring matrix (approve only when P(A) > 1.5·P(D) and it
+   beats the review hedge; never omit a case). Confidence is a per-case logistic
+   calibrator with isotonic correction, fit out-of-fold.
+
+## Robustness
+
+- **Per-PDF watchdog** (`scripts/predict.py`): a three-layer defense against a
+  single pathological PDF eating the 30,000 s batch cap — an in-worker SIGALRM
+  per-case deadline, plus a parent heartbeat watchdog that kills and respawns a
+  worker hung below the Python signal layer, plus a planned fresh-process
+  recycle every 48 completed packets to stay well clear of the native-library
+  lifetime cliff observed in the first 5,000-packet control run. Completed rows
+  are flushed and `fsync`'d before every recycle, and the parent resumes only
+  the unfinished tail. Every case still gets one well-formed row. Verified with
+  injected hangs and byte-identity recycle tests in `tests/test_watchdog.py`.
+- **Self-authored red-team corpus** (`tests/redteam_corpus/`, built by
+  `tools/redteam/build_corpus.py`): every injection vector the spec names but
+  the public data omits — QR/barcode instructions, under-image text, hidden OCG
+  layers, render-mode-3, opacity-0, microtext, visible answer-key decoys,
+  sample-denial watermarks, hidden-only field values. `tests/test_redteam.py`
+  proves each trap changes nothing versus its clean twin and no hidden token
+  reaches output.
+- **Perturbation harness** (`tools/perturb.py`): re-renders a dev subsample with
+  degradations the training set lacks (180° pages, heavy wash, DPI resample,
+  smudges relocated onto labels) and reports score stability.
+
+## Layout
+
+```
+mib/            runtime package (forensics, ocr, parse, rules, pipeline)
+models/         tiny JSON artifacts (name lexicon, path priors, calibrator)
+scripts/        predict.py (entrypoint) + run_shard.py; dev-time fitters
+tools/          dev-time harnesses (census, perturbation, review/red-team builders)
+tests/          golden rule tests, decision table, watchdog, red-team corpus
+Dockerfile      offline CPU image (no torch, no LLM)
+MEMO.md         the technical memo (approach, negative results, failure modes)
+NOTICE.md       third-party licenses + provenance of every models/ artifact
+```
+
+Set `MIB_CHALLENGE_DIR` to your checkout of the public challenge repository if
+it is not a sibling directory of this one; dev-time tooling and the data-backed
+tests resolve the training PDFs and labels through it.
+
+## Testing
+
+```bash
+pip install pytest && python -m pytest tests/ -q
+```
+
+The suite runs from a clean checkout without a build step: golden tests for
+every mined policy rule, the EV decision table, vocab snapping and parser
+guards, span classification, the calibrator round-trip, injected-hang recovery,
+and the full red-team corpus.
+
+`tools/build_review_kit.py` rebuilds the evidence-aware HTML review kit from a
+specific truth/prediction/ledger/state bundle. It refuses to overwrite an
+existing kit, records hashes for every input artifact, validates all local
+links, and keeps hidden PDF content quarantined from reviewer hints.
+
+## Compliance
+
+CPU-only, offline, deterministic seeds, image well under the 4 GiB / 250 MiB
+artifact caps. No LLM, VLM, or instruction-following component of any size runs
+at inference time — the system contains nothing that can be prompt-injected.
