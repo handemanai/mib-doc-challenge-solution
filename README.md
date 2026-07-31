@@ -11,7 +11,14 @@ gated on positively-read and cross-corroborated evidence, and hidden/injected
 text is treated as a distrust signal that can only ever push *away* from
 approval — never as evidence.
 
+Reviewers: `docs/REVIEWER_GUIDE.md` maps every claim in `MEMO.md` to the
+fastest way to verify it.
+
 ## One-command reproduction
+
+The commands below assume the challenge repository's `data/` directory is
+available in this checkout (for example `ln -s <challenge-repo>/data data`);
+see `MIB_CHALLENGE_DIR` under Layout.
 
 ```bash
 # Build and label the exact clean revision (no network needed at run time)
@@ -27,8 +34,12 @@ docker run --rm --network none --cpus 4 --memory 8g \
 ```
 
 Add `--ledger /out/ledger.jsonl` after the output path (or set `MIB_LEDGER`) to
-emit the per-case evidence audit trail alongside the predictions. A bound
-candidate evaluation must also pass all three identity arguments:
+emit the per-case evidence audit trail alongside the predictions.
+
+Optional, audit-grade identity-bound rerun — a bound candidate evaluation must
+also pass all three identity arguments (`evaluation/image-inspect.json` and
+`evaluation/runtime-manifest.json` are captured from the actual image first,
+e.g. `docker image inspect "$IMAGE_ID" > evaluation/image-inspect.json`):
 
 ```bash
 # First create the supervised pre-run identity from the clean checkout, saved
@@ -95,7 +106,9 @@ flowchart TD
     B -. never toward APPROVED .-> G
 ```
 
-**Five layers**, each documented in `MEMO.md`:
+**Five stages** — `MEMO.md` documents the same pipeline as six layers,
+splitting the two-ledger native/composited fusion (folded into stage 1 here)
+into its own layer:
 
 1. **PDF forensics + two physical views** — every text span is classified
    visible/hidden by render mode, opacity, color, size, and page-crop position.
@@ -167,9 +180,13 @@ models/         tiny JSON artifacts (name lexicon, path priors, calibrator)
 scripts/        predict.py (entrypoint) + run_shard.py; dev-time fitters
 tools/          dev-time harnesses (census, perturbation, review/red-team builders)
 tests/          golden rule tests, decision table, watchdog, red-team corpus
+run.sh          container entrypoint (execs scripts/predict.py)
 Dockerfile      offline CPU image (no torch, no LLM)
 MEMO.md         the technical memo (approach, negative results, failure modes)
+SUBMISSION.md   contract measurements + predictions provenance
 NOTICE.md       third-party licenses + provenance of every models/ artifact
+docs/           REVIEWER_GUIDE.md (verify the claims in 15 minutes) + opportunity register
+experiments/    CFA-MIB-000865 irreducibility forensic
 ```
 
 Set `MIB_CHALLENGE_DIR` to your checkout of the public challenge repository if

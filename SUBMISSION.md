@@ -6,7 +6,7 @@
 ## What this is
 
 An offline, CPU-only adjudication engine for the MIB intergalactic intake desk.
-It reads adversarial PDF case packets, extracts the ten applicant fields, and
+It reads adversarial PDF case packets, extracts the nine applicant fields, and
 recommends `APPROVED` / `DENIED` / `NEEDS_REVIEW` with a calibrated confidence.
 Every decision is backed by a per-case evidence ledger.
 
@@ -38,6 +38,11 @@ failure modes, and what another week buys).
 
 ## Reproduce
 
+Run from a checkout with the challenge repository's `data/` available alongside
+(clone `github.com/8090-inc/mib-doc-challenge` for `data/validation`,
+`data/validation_manifest.csv`, and `scripts/validate_submission.py`), and
+create the output directory first: `mkdir -p /tmp/mib-out`.
+
 ```bash
 docker build -t mib-submission .
 docker run --rm --network none --cpus 4 --memory 8g --read-only \
@@ -57,3 +62,12 @@ the provenance record that ties those 5,000 rows to a commit of this repository.
 Reproducing the command above on `data/validation` regenerates it; it passes
 `scripts/validate_submission.py` against `data/validation_manifest.csv` with
 5,000 records and no missing cases.
+
+## Documentation-only commits after `53dbe7a`
+
+The submitted `predictions.jsonl` was generated at commit `53dbe7a` of this
+repository. Every commit after `53dbe7a` touches documentation and experiment
+receipts only — nothing under `mib/`, `scripts/`, `models/`, `tests/`,
+`tools/`, `Dockerfile`, or `run.sh` changes, verifiable with
+`git diff 53dbe7a..HEAD -- mib scripts models tests tools Dockerfile run.sh`
+(empty output), so a rebuild at any later commit reproduces the same rows.

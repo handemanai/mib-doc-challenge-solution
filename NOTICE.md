@@ -12,7 +12,7 @@ this repository, not to the third-party components listed below.
 
 | File | Component | Upstream | License |
 | --- | --- | --- | --- |
-| `models/en_PP-OCRv5_rec_mobile.onnx` (7.5 MB) | PP-OCRv5 English mobile text-recognition model | PaddleOCR / PaddlePaddle, exported to ONNX | Apache-2.0 |
+| `models/en_PP-OCRv5_rec_mobile.onnx` (7.9 MB) | PP-OCRv5 English mobile text-recognition model | PaddleOCR / PaddlePaddle, exported to ONNX | Apache-2.0 |
 
 This file is redistributed unmodified, and is the only third-party *artifact*
 committed to this repository. Its PaddlePaddle origin is self-evident from the

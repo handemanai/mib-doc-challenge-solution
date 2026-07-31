@@ -30,7 +30,9 @@ truth as an input to reading or rule construction.
 The target PDF is bound by SHA-256
 `f197d4be25fb96ebb6b69ca9c040f6340887405471b238219ba13a3cf2195fbc`.
 The frozen source commit is
-`e392ce99b134e75887a3a0950446760ed83ee114`.
+`e392ce99b134e75887a3a0950446760ed83ee114` (a pre-publication working-tree
+commit in the private experiment tree; the shipped `53dbe7a` state emits the
+identical fields and decision for this packet).
 
 The exact-pattern cohort was selected from visible cached state before opening
 its comparator labels. The target's already-known error motivated the
@@ -136,7 +138,8 @@ the tracked portfolio:
 | `FORENSIC_FINDINGS.md` | `df7ebdf38163f323f8d5dc8e7b995f1d30fe4d12ad5b0d5f20b746a0a56c3513` |
 
 The frozen state, state receipt, terminal evaluation receipt, evidence ledger,
-and tracked group manifest are bound in the accompanying standardized receipt.
+and tracked group manifest are bound in a standardized receipt that lives in
+the private experiment tree; this file is the self-contained public summary.
 
 ## Rule boundary
 
@@ -154,6 +157,6 @@ A future reconsideration requires a label-blind, repeated, group-supported
 failure mechanism; a review-only effect; zero new catastrophic approvals; no
 usable-group score regression; and perturbation/provenance validation.
 
-The public `mib-solution-public/MEMO.md` independently corroborates the
-pixel-level absence of `TRANSIT-7`. It was consulted only after this
+The technical memo (`MEMO.md` in this repository) independently corroborates
+the pixel-level absence of `TRANSIT-7`. It was consulted only after this
 reproduction and is not an input to the gate or its measured result.

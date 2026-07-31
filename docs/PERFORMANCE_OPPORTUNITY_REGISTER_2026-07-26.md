@@ -4,8 +4,8 @@ Date opened: 2026-07-26
 Program objective: win the MIB document challenge with a visible-evidence,
 private-test-resilient, reproducible system.
 Scope: performance, robustness, calibration, runtime allocation, and technical
-elegance. Submission-form, PR-body, and administrative cleanup are deliberately
-out of scope until the user reauthorizes them.
+elegance. Submission-form, PR-body, and administrative cleanup were handled
+separately and are out of scope for this register.
 
 This file is the durable index for the full opportunity portfolio derived from
 the 2026-07-26 external competitive review. No item disappears because it is not
@@ -16,6 +16,17 @@ Reconciliation snapshot: committed source `b9a33c6` plus the full 1,105-line
 source report. This pass changes portfolio bookkeeping only. It does not claim
 that an uncommitted or temporary experiment ran, does not rewrite historical
 receipts, and does not convert diagnostic evidence into promotion evidence.
+
+> **Provenance note (2026-07-31).** This register is a point-in-time snapshot of
+> the private experiment tree's tracking board, published so reviewers can see
+> the full opportunity portfolio, including the directions we measured and
+> declined. Commit hashes cited in individual rows (`b9a33c6`, `441709c`,
+> `f580782`, `e6c7519`) and file paths under `experiments/receipts/`,
+> `docs/REG_15A_V2_DEBUG_OUTCOME.md`, and
+> `docs/ACTION_PROVENANCE_AND_DECISION_FEATURES_V3_CONTRACT.md` refer to that
+> private tree and are not present in this repository. The one judge-facing
+> forensic artifact is included here as
+> `experiments/CFA-MIB-000865-visible-forensic.md`.
 
 ## Status vocabulary
 
@@ -57,7 +68,7 @@ dependencies; it does not erase or reinterpret the prior result.
 
 | ID | Opportunity | Premise | Current status | Dependency | Disposition |
 | --- | --- | --- | --- | --- | --- |
-| CTRL-01 | Durable opportunity/experiment board | Rich source analysis must not be lost between threads | SOURCE INVENTORY LOSSLESS AT `b9a33c6`; OUTCOME RECONCILIATION CONTINUES | CTRL-03 for canonical receipt/index parity | PRESERVE this board as the source-of-truth opportunity inventory; individual rows still require their own terminal receipts |
+| CTRL-01 | Durable opportunity/experiment board | Rich source analysis must not be lost between working sessions | SOURCE INVENTORY LOSSLESS AT `b9a33c6`; OUTCOME RECONCILIATION CONTINUES | CTRL-03 for canonical receipt/index parity | PRESERVE this board as the source-of-truth opportunity inventory; individual rows still require their own terminal receipts |
 | CTRL-02 | Immutable experiment receipts | Scores without source/config/group identity are not decision-grade | PARTIAL; PRODUCTION SCOPES EXPLICITLY FAIL-CLOSED | standardized-v2 receipt plus semantically replayed mechanism evidence | `evaluation_only` and `safety_only` retain their existing gates; `field_only`, `calibration_only`, `reader`, `approval`, and `architecture` cannot SHIP from hash-bound claims and remain PARK until their exact artifacts are parsed and outcomes recomputed |
 | CTRL-03 | Reconcile the register, receipt index, and live portfolio | A stale tracking surface can silently lose a negative result, dependency, or still-uncommitted receipt | DOCS RECONCILED THROUGH `b9a33c6`; CANONICAL INDEX STILL STALE | separately authorized historical-receipt reconciliation, mechanism-aware outcome receipts, and a regenerated deterministic portfolio index | PARK canonical closure: the standard index check still stops on a stale ARB-01 contract hash and the hash-skipping check reports a stale generated index; this docs-only pass changes no receipt and proves no experiment outcome |
 | EVAL-01 | Repair large-run evaluation orchestration | Current workers retire after 48 cases but `eval_split` did not respawn them | PARTIAL LIVE PROOF | terminal matched RUN-08 rescue/identity evidence, then a fresh exact official-config 1,000-case run | Planned recycling and fresh retry processes worked, and incomplete extraction failed closed; the fc8 label-free run produced 998 successful states but no terminal cache because `MIB-000796` and `MIB-000989` exceeded both standard attempts. RUN-08 is now the bounded critical-path continuation for reproducing completed attempt-1 OCR work inside attempt 2; implementation alone is not outcome evidence |
@@ -362,3 +373,37 @@ safety/grouped-evaluation gate.
    stabilizes.
 6. `RUN`: allocate the surviving readers under a measured budget.
 7. `GRAPH/BAR`: attempt only if simpler lanes plateau and time/support remain.
+
+## Closing addendum (2026-07-31)
+
+Final pre-submission measurements taken after this register's date. Each is a
+measured decline, not an open opportunity; none changed the shipped code or
+predictions.
+
+- **Hedge-resolution resolver (rival-style EV forest), measured on our 258
+  eligible hedges:** in-sample +4.83 total at 13 catastrophic false approvals;
+  honest 5-fold out-of-fold replication of the same architecture across three
+  fold seeds yields +1.35 to +2.75 total at 3–25 new CFAs per 1,000 depending
+  on guard. No CFA-clean operating point exists: the approve-only
+  conf ≥ 0.695 guard that shows zero false approvals in-sample mints 3–8 out
+  of sample. Declined.
+- **Confidence-threshold hedge conversion:** +2.48 train at 34 CFAs. Declined.
+- **NR & conf < 0.5 → APPROVED remap:** +0.075 net, CFA 1 → 43. Declined.
+- **Fee dark head:** +0.946, CFA 1 → 3. Ships disabled.
+- **Flags head (never built; reconstructed ceiling):** +0.65 to +0.77,
+  CFA 1 → 11. Not built.
+- **Calibration transforms:** all negative under cross-validation; the fitted
+  temperature is the identity, and oracle isotonic is worth +0.049. Unchanged.
+- **POL-12 dual fee-clearance unlock:** generator-impossible — 0/1,000 train
+  packets carry two fee-bearing surfaces, and an exhaustive 4,096-conjunction
+  zero-D search is empty. The POL-12 row above is superseded: CLOSED, not PARK.
+- **Deny-flag residual:** information-bounded — of 35 denied-hedge flag cases,
+  14 have no scan surface and 21 were attempted and failed the evidence gate;
+  truth-word template scores (0.41–0.61) are indistinguishable from truth-none
+  controls (0.38–0.63, n=21 vs 30).
+- **Hedge residual 40-case audit:** 37 information-absent, 3 policy-correct
+  declines on untrusted surfaces (SAMPLE DENIAL / ARCHIVE / hidden text),
+  0 clean misreads.
+- **Fee residual mechanism:** absent waiver evidence — 86/123 fee misses are
+  truth `waived` with the waiver-code page absent (evidence pools empty in
+  96/123) — not "unreadable unknown".
