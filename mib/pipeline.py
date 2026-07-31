@@ -128,7 +128,17 @@ def _snap_name(name):
     if independent == name and all(t in _NAMES["first"] for t in parts):
         return independent            # exact lexicon hit: nothing to decode
     best = process.extractOne(name, _joint_names(), scorer=fuzz.ratio, score_cutoff=55)
-    return best[0] if best else independent
+    # Open-set hardening: the lexicon is mined from public train, so a private
+    # set may print names whose syllables it lacks. A clean novel name must
+    # not be force-rewritten into the nearest lexicon entry — rewriting is
+    # only trustworthy when the decode is close (joint >= 85) or one token
+    # already anchors the read inside the lexicon exactly.
+    token_anchor = (parts[0] in _NAMES["first"]) or (parts[1] in _NAMES["last"])
+    if best and (best[1] >= 85 or token_anchor):
+        return best[0]
+    if token_anchor:
+        return independent
+    return name
 
 
 def _name_lexicon_ok(value):
@@ -2123,8 +2133,12 @@ def decide(state, receipt_date=None, batch_revoked=frozenset()):
     # never exceed the epoch by more than ~5 days in 1,000 labeled cases;
     # 39 dev packets carry such reads, all misreads like 2025->2028) — the
     # exact single-digit mechanism that turns a stale denial into a false
-    # approval. Never approve on one.
-    if "arrival_date" in extracted and decision != "DENIED":
+    # approval. Never approve on one. DIP-1 is exempt from staleness policy
+    # entirely (rules.adjudicate never denies a DIP-1 on age), so a date in
+    # the gray zone or garbled into the future cannot change a DIP-1
+    # adjudication and must not hedge it.
+    if ("arrival_date" in extracted and decision != "DENIED"
+            and fields.get("visa_class") != "DIP-1"):
         try:
             age = (receipt - date.fromisoformat(fields["arrival_date"])).days
             if STALE_HEDGE_DAYS[0] <= age <= STALE_HEDGE_DAYS[1]:
@@ -2610,7 +2624,15 @@ def _batch_epoch_from_pool(states, pool_name, meta_shift=0):
         return MINED_EPOCH + timedelta(days=meta_shift)
     dates.sort()
     p90 = dates[max(0, int(len(dates) * 0.90) - 1)]
-    bulk_max = max(d for d in dates if d <= p90 + timedelta(days=60))
+    # A single date must never define the epoch ceiling: one garbled read
+    # sitting just inside the p90+60 window could otherwise drag the clamp.
+    # When the top qualifying date is isolated (>45 days past the runner-up),
+    # the runner-up is the real bulk edge.
+    qualifying = sorted(d for d in dates if d <= p90 + timedelta(days=60))
+    bulk_max = qualifying[-1]
+    if (len(qualifying) >= 2
+            and (qualifying[-1] - qualifying[-2]).days > 45):
+        bulk_max = qualifying[-2]
     shift = max(0, (p90 - P90_TRAIN_REF).days)
     if shift < 14:
         shift = 0

@@ -67,6 +67,66 @@ FIELDS = (
     "fee_status",
 )
 
+POST_FUSION_REVIEW_CONFIDENCE = 0.55
+
+
+def enforce_final_consistency(pred, detail, receipt):
+    """Reconcile a final APPROVED row with the exact fields it will emit.
+
+    Selection and fusion pick fields after the decision is made, so a row can
+    otherwise ship APPROVED while its own printed evidence demands denial —
+    the one pattern a reviewer can refute from the submission file alone.
+
+    Semantics (can only preserve or narrow an approval, never create or deny):
+    - Emitted fields adjudicate APPROVED: unchanged.
+    - Approval rests on a rank-1 adjudicator-note finding (the manual's
+      highest evidence rank): the finding stays authoritative for the
+      decision. When the sole policy contradiction is fee_status == "unpaid",
+      the fee field is reconciled to "paid" — an approved case has a cleared
+      fee, a visible waiver would have been read as "waived", and the one
+      labeled train instance of this shape (MIB-000893) is truth paid behind
+      a superseded-copy receipt. Other contradictions keep their fields (no
+      safe reconstruction exists) and the approval stands, with the conflict
+      recorded for audit.
+    - Any other approval whose emitted fields adjudicate DENIED or
+      NEEDS_REVIEW narrows to NEEDS_REVIEW at capped confidence.
+    """
+    from . import rules
+
+    if pred.get("adjudication") != "APPROVED":
+        return pred, detail
+    fields = {f: pred.get(f) for f in FIELDS}
+    policy, policy_reasons = rules.adjudicate(fields, receipt_date=receipt)
+    if policy == "APPROVED":
+        return pred, detail
+    note_authority = (detail.get("reasons") == ["adjudicator_note"])
+    audit = {
+        "final_before": "APPROVED",
+        "ordinary_policy_decision": policy,
+        "ordinary_policy_reasons": list(policy_reasons),
+        "note_authority": note_authority,
+    }
+    if note_authority:
+        if policy == "DENIED" and policy_reasons == ["unpaid_fee"]:
+            pred = dict(pred)
+            pred["fee_status"] = "paid"
+            audit["action"] = "fee_reconciled_to_note_finding"
+        else:
+            audit["action"] = "preserved_rank1_finding_approval"
+        detail = dict(detail)
+        detail["post_fusion_consistency"] = audit
+        return pred, detail
+    pred = dict(pred)
+    pred["adjudication"] = "NEEDS_REVIEW"
+    pred["confidence"] = min(
+        float(pred.get("confidence", 1.0)), POST_FUSION_REVIEW_CONFIDENCE)
+    detail = dict(detail)
+    detail["reasons"] = ["post_fusion_field_conflict"]
+    audit["action"] = "review_field_conflict"
+    audit["final_after"] = "NEEDS_REVIEW"
+    detail["post_fusion_consistency"] = audit
+    return pred, detail
+
 
 # --- evdom-v1 selector (ported verbatim from field_view_selector_frozen.py) ---
 
@@ -245,7 +305,7 @@ def decide_case(state, base_epoch, native_epoch, base_revoked, native_revoked,
     base_pred, base_detail = decide(state, base_epoch, batch_revoked=base_revoked)
     native = state.get("native_ledger")
     if not ablation or native is None:
-        return base_pred, base_detail
+        return enforce_final_consistency(base_pred, base_detail, base_epoch)
 
     native_pred, native_detail = decide(
         native, native_epoch, batch_revoked=native_revoked)
@@ -305,7 +365,7 @@ def decide_case(state, base_epoch, native_epoch, base_revoked, native_revoked,
     detail = dict(base_detail)
     detail["reasons"] = reasons
     detail["two_ledger"] = transition_record
-    return pred, detail
+    return enforce_final_consistency(pred, detail, base_epoch)
 
 
 def _agreement_count(evidence):

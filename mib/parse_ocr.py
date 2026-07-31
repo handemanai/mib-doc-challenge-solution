@@ -196,6 +196,16 @@ def _snap_value(field, raw):
              "declared_purpose": PURPOSES, "fee_status": FEES}.get(field)
     if vocab:
         value, score, _ = snap(raw, vocab, min_score=72)
+        if field == "home_world" and value:
+            # An embargo world is a deny trigger, so snapping INTO one needs
+            # near-exact evidence: a private set can print worlds outside the
+            # public vocabulary, and a loose fuzzy hit (TRAPPIST-2c ->
+            # TRAPPIST-1e @ 81.8) would manufacture a wrong denial plus a
+            # corrupted field. Non-embargo snaps keep the ordinary bar.
+            from .rules import HARD_EMBARGO_WORLDS, SOFT_EMBARGO_WORLDS
+            if (value in HARD_EMBARGO_WORLDS or value in SOFT_EMBARGO_WORLDS) \
+                    and score < 90:
+                return None, 0.0
         return value, score
     if field == "risk_flags":
         parts = re.split(r"[|,;]+", raw)
