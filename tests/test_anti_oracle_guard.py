@@ -1,9 +1,7 @@
-"""Anti-oracle approval guard (dark, env MIB_ANTI_ORACLE_GUARD): hidden
-answer-key APPROVED claims are trap signatures (0/157 truly approved on
-train), so with the flag on, tentative approvals that agree with one demote
-to review — while note authority and every other direction stay untouched.
-Default OFF preserves the trap==clean-twin output invariant; the train
-census shows zero dev fires either way (pure private-set insurance).
+"""Hidden answer-key verdicts are metadata, never decision evidence.
+
+The output must be identical for hidden APPROVED and DENIED claims, including
+when a stale caller still supplies the retired anti-oracle environment flag.
 """
 import os
 from unittest import mock
@@ -55,8 +53,8 @@ def test_guard_is_dark_by_default():
 
 
 @mock.patch.dict(os.environ, {"MIB_ANTI_ORACLE_GUARD": "1"})
-def test_agreeing_hidden_approval_demotes_to_review_when_enabled():
-    assert _decide_with_injection(True)["adjudication"] == "NEEDS_REVIEW"
+def test_hidden_approval_claim_is_outcome_inert_even_with_legacy_flag():
+    assert _decide_with_injection(True)["adjudication"] == "APPROVED"
 
 
 @mock.patch.dict(os.environ, {"MIB_ANTI_ORACLE_GUARD": "1"})
@@ -65,15 +63,21 @@ def test_non_approving_key_leaves_clean_approval_alone():
 
 
 @mock.patch.dict(os.environ, {"MIB_ANTI_ORACLE_GUARD": "1"})
-def test_note_authority_survives_the_guard():
+def test_hidden_verdict_direction_cannot_change_the_output():
+    approved_claim = _decide_with_injection(True)
+    denied_claim = _decide_with_injection(False)
+    assert approved_claim == denied_claim
+
+
+@mock.patch.dict(os.environ, {"MIB_ANTI_ORACLE_GUARD": "1"})
+def test_note_authority_is_unchanged_by_hidden_verdict_metadata():
     out = _decide_with_injection(True, doc_notes={"finding": "APPROVED"})
     assert out["adjudication"] == "APPROVED"
 
 
 @mock.patch.dict(os.environ, {"MIB_ANTI_ORACLE_GUARD": "1"})
-def test_guard_never_widens_toward_approval():
-    # A DENIED case with a hidden APPROVED claim stays DENIED: the guard only
-    # ever narrows approvals, never inverts a hidden claim into a decision.
+def test_hidden_verdict_metadata_never_widens_toward_approval():
+    # A DENIED case with a hidden APPROVED claim stays DENIED.
     st = state(dict(ALL, fee_status=("unpaid", "fee_receipt", 95.0, 1)))
     st["injection"] = {"hidden_span_count": 6, "has_answer_key": True,
                       "has_system_prompt": True,

@@ -44,6 +44,26 @@ def page_case_ids(text):
     return set(CASE_RE.findall(body))
 
 
+def _case_id_matches(case_id, observed_id):
+    """Accept the active id or a single-digit OCR substitution of it."""
+    return (observed_id == case_id
+            or (len(observed_id) == len(case_id)
+                and sum(a != b for a, b in zip(observed_id, case_id)) <= 1))
+
+
+def page_is_foreign(case_id, text):
+    """True when body text contains any confidently foreign case id.
+
+    A packet wrapper is not body identity.  Likewise, an active-id header does
+    not authorize fields elsewhere on a page that also names another case.
+    A sole Hamming-one id remains usable because that is a common OCR error on
+    otherwise legitimate pages.
+    """
+    ids = page_case_ids(text)
+    return bool(ids) and any(
+        not _case_id_matches(case_id, observed_id) for observed_id in ids)
+
+
 def extract_from_visible_text(case_id, page_texts):
     """page_texts: list of visible-span text per page. Returns {field: (value, source)}."""
     out = {}
@@ -53,8 +73,7 @@ def extract_from_visible_text(case_id, page_texts):
             out[field] = (value.strip(), source)
 
     for text in page_texts:
-        ids = page_case_ids(text)
-        if ids and case_id not in ids:
+        if page_is_foreign(case_id, text):
             continue  # decoy page for a different applicant
         is_letter = "attests" in text
 

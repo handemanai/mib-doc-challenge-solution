@@ -247,17 +247,12 @@ def _foreign_page(case_id, texts):
     """True if the page confidently names a different case id (decoy applicant
     page). Footer lines are excluded space-tolerantly ("PacketMIB-000320/page2")
     — every page carries the ACTIVE packet's footer, which would otherwise mask
-    a decoy page's foreign Case ID. An id within one garbled digit of the
-    active id counts as the active id: OCR flips a single digit often enough
+    a decoy page's foreign Case ID. An active body header cannot cancel a
+    second, confidently foreign body id. An id within one garbled digit of the
+    active id still counts as active: OCR flips a single digit often enough
     that the guard was discarding genuine pages (and their true field values)
     as decoys."""
-    body = "\n".join(t for t in texts if not _FOOTER_RE.search(t))
-    def _own(i):
-        return (i == case_id
-                or (len(i) == len(case_id)
-                    and sum(a != b for a, b in zip(i, case_id)) <= 1))
-    ids = set(CASE_RE.findall(body))
-    return bool(ids) and not any(_own(i) for i in ids)
+    return extract.page_is_foreign(case_id, "\n".join(texts))
 
 
 _NOTE_CASE_LINE_RE = re.compile(r"^Case ID: (MIB-\d{6})$")
@@ -2320,26 +2315,6 @@ def decide(state, receipt_date=None, batch_revoked=frozenset()):
         elif (recovered == "APPROVED" and decision in ("DENIED", "NEEDS_REVIEW")
               and noteread.approve_enabled()):
             decision, reasons = "APPROVED", ["recovered_adjudicator_note_approve"]
-
-    # Anti-oracle approval guard (code default OFF; the shipped container
-    # enables it via run.sh): the planted answer key's adjudication token is
-    # wrong by construction (0/157 train packets whose hidden key claims
-    # APPROVED are truly APPROVED — all are DENIED or NEEDS_REVIEW traps), so
-    # agreement between our tentative APPROVED and a hidden APPROVED claim is
-    # a trap signature, not corroboration. It fires on zero of the 1,000
-    # labeled training cases (the demotion is pure false-approval insurance),
-    # and it is the one deliberate, documented exception to the
-    # trap==clean-twin output invariant the red-team suite proves: hidden
-    # content is never evidence, and its presence can only push a decision
-    # away from approval. Distrust-direction only: a legible or recovered
-    # adjudicator-note approval keeps its authority, and hidden
-    # DENIED/NEEDS_REVIEW claims never influence anything in any direction.
-    if (os.environ.get("MIB_ANTI_ORACLE_GUARD", "0") == "1"
-            and decision == "APPROVED"
-            and state["injection"].get("answer_key_claims_approved")
-            and doc_notes.get("finding") != "APPROVED"
-            and reasons != ["recovered_adjudicator_note_approve"]):
-        decision, reasons = "NEEDS_REVIEW", ["injected_approval_agreement"]
 
     rank1_payload = {
         "finding": doc_notes.get("finding"),

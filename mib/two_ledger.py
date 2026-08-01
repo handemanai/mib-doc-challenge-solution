@@ -81,13 +81,10 @@ def enforce_final_consistency(pred, detail, receipt):
     - Emitted fields adjudicate APPROVED: unchanged.
     - Approval rests on a rank-1 adjudicator-note finding (the manual's
       highest evidence rank): the finding stays authoritative for the
-      decision. When the sole policy contradiction is fee_status == "unpaid",
-      the fee field is reconciled to "paid" — an approved case has a cleared
-      fee, a visible waiver would have been read as "waived", and the one
-      labeled train instance of this shape (MIB-000893) is truth paid behind
-      a superseded-copy receipt. Other contradictions keep their fields (no
-      safe reconstruction exists) and the approval stands, with the conflict
-      recorded for audit.
+      decision, but it does not invent field values. An emitted unpaid fee is
+      changed only when the same rank-1 payload explicitly corrects fee_status
+      to paid or waived. Other contradictions keep their fields and the
+      approval stands, with the conflict recorded for audit.
     - Any other approval whose emitted fields adjudicate DENIED or
       NEEDS_REVIEW narrows to NEEDS_REVIEW at capped confidence.
     """
@@ -108,9 +105,15 @@ def enforce_final_consistency(pred, detail, receipt):
     }
     if note_authority:
         if policy == "DENIED" and policy_reasons == ["unpaid_fee"]:
-            pred = dict(pred)
-            pred["fee_status"] = "paid"
-            audit["action"] = "fee_reconciled_to_note_finding"
+            rank1_fee = ((detail.get("rank1_payload") or {}).get("fields")
+                         or {}).get("fee_status")
+            if rank1_fee in {"paid", "waived"}:
+                pred = dict(pred)
+                pred["fee_status"] = rank1_fee
+                audit["action"] = \
+                    "fee_reconciled_to_explicit_rank1_correction"
+            else:
+                audit["action"] = "preserved_rank1_finding_approval"
         else:
             audit["action"] = "preserved_rank1_finding_approval"
         detail = dict(detail)

@@ -132,3 +132,32 @@ def test_decoy_page_case_ids_exclude_footer():
     from mib.extract import page_case_ids
     text = "Packet MIB-000320 / page 2\nCase ID: MIB-000999"
     assert page_case_ids(text) == {"MIB-000999"}
+
+
+def test_active_header_cannot_authorize_foreign_body_fields():
+    from mib.extract import extract_from_visible_text
+    fields = extract_from_visible_text("MIB-000320", [
+        "Case ID: MIB-000320\nRelated Case ID: MIB-000999\n"
+        "Applicant: Decoy Person",
+    ])
+    assert fields == {}
+
+
+def test_one_digit_case_id_ocr_confusion_keeps_legitimate_fields():
+    from mib.extract import extract_from_visible_text
+    fields = extract_from_visible_text("MIB-000320", [
+        "Case ID: MIB-000329\nApplicant: Real Person",
+    ])
+    assert fields["applicant_name"] == ("Real Person", "slip_label")
+
+
+def test_active_header_plus_foreign_body_is_a_foreign_ocr_page():
+    from mib.pipeline import _foreign_page
+    assert _foreign_page("MIB-000320", [
+        "Case ID: MIB-000320", "Related Case ID: MIB-000999",
+    ])
+
+
+def test_one_digit_case_id_ocr_confusion_is_not_a_foreign_ocr_page():
+    from mib.pipeline import _foreign_page
+    assert not _foreign_page("MIB-000320", ["Case ID: MIB-000329"])

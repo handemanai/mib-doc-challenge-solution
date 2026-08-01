@@ -48,16 +48,26 @@ def test_revoked_sponsor_approval_without_note_narrows():
     assert pred["adjudication"] == "NEEDS_REVIEW"
 
 
-def test_note_approval_reconciles_unpaid_fee_to_paid():
-    # MIB-000893 shape: rank-1 note finding APPROVED, superseded-copy receipt
-    # misread as unpaid; truth fee is paid.
+def test_note_approval_does_not_invent_paid_fee_without_correction():
     pred, detail = enforce_final_consistency(
         _pred(fee_status="unpaid", confidence=0.99),
         {"reasons": ["adjudicator_note"]}, RECEIPT)
     assert pred["adjudication"] == "APPROVED"
-    assert pred["fee_status"] == "paid"
+    assert pred["fee_status"] == "unpaid"
     assert (detail["post_fusion_consistency"]["action"]
-            == "fee_reconciled_to_note_finding")
+            == "preserved_rank1_finding_approval")
+
+
+def test_explicit_rank1_fee_correction_can_reconcile_emitted_value():
+    pred, detail = enforce_final_consistency(
+        _pred(fee_status="unpaid", confidence=0.99), {
+            "reasons": ["adjudicator_note"],
+            "rank1_payload": {"fields": {"fee_status": "waived"}},
+        }, RECEIPT)
+    assert pred["adjudication"] == "APPROVED"
+    assert pred["fee_status"] == "waived"
+    assert (detail["post_fusion_consistency"]["action"]
+            == "fee_reconciled_to_explicit_rank1_correction")
 
 
 def test_note_approval_with_other_conflict_is_preserved_and_audited():
