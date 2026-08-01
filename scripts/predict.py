@@ -380,7 +380,6 @@ def _effective_run_config():
         "MIB_NATIVE_SCAN_FAST_DPI": "150",
         "MIB_PIXMATCH": "1",
         "MIB_TRANSDUCER": "0",
-        "MIB_ANTI_ORACLE_GUARD": "0",
         "MIB_GOVERNOR": "1",
         "MIB_REC_MODEL": "",
         "MIB_PIX_BANK": "",

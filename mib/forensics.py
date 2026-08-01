@@ -1627,20 +1627,10 @@ def injection_signals(hidden_spans):
     """Features describing adversarial hidden content. Used ONLY to lower trust
     (never to derive field values or push a case toward APPROVED)."""
     text = "\n".join(s.text for s in hidden_spans)
-    claims_approved = False
-    for line in text.splitlines():
-        if "answer key only:" not in line:
-            continue
-        tokens = [t.strip() for t in
-                  line.split("answer key only:", 1)[1].split(",")]
-        # Key grammar ends ...,fee,ADJUDICATION,confidence.
-        if len(tokens) >= 3 and tokens[-2].upper() == "APPROVED":
-            claims_approved = True
     return {
         "hidden_span_count": len(hidden_spans),
         "has_answer_key": "answer key" in text.lower(),
         "has_system_prompt": "SYSTEM:" in text,
-        "answer_key_claims_approved": int(claims_approved),
     }
 
 
