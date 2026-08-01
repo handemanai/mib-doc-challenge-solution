@@ -221,8 +221,12 @@ tests resolve the training PDFs and labels through it.
 
 ## Testing
 
-**Recommended — run inside the image you already built.** No local Python setup,
-and the dependency versions are guaranteed to match the scored container:
+1,100 tests covering every mined policy rule, the EV decision table, vocab
+snapping and parser guards, span classification, the calibrator round-trip,
+injected-hang recovery, the governor ladder, and the full red-team corpus.
+
+The simplest way to run them is inside the image, which needs no local Python
+setup and guarantees the dependency versions match the scored container:
 
 ```bash
 docker build -t mib-submission .
@@ -231,11 +235,9 @@ docker run --rm --entrypoint bash -v "$PWD:/src" -w /src mib-submission -c \
 # 990 passed, 110 skipped, 0 failed
 ```
 
-`pytest` is not in the runtime image, so this command needs network access while
-the scored run does not. Everything that cannot run in a bare container skips
-rather than fails: 44 provenance tests need `git` (absent from
-`python:3.11-slim`) and the rest are data-backed. Add `git` and a challenge
-checkout to run them all:
+Whatever a bare container cannot support skips rather than fails: the
+provenance tests build a scratch repository and so need `git`, and the
+data-backed tests need the challenge PDFs. Supply both to run all 1,100:
 
 ```bash
 docker run --rm --entrypoint bash \
@@ -243,29 +245,21 @@ docker run --rm --entrypoint bash \
   -e MIB_CHALLENGE_DIR=/challenge mib-submission -c \
   "apt-get update -qq && apt-get install -y -qq git && pip install -q pytest && \
    python -m pytest tests/ -q"
-# 1,100 collected: 1,049 passed, 51 skipped, 0 failed
+# 1,049 passed, 51 skipped, 0 failed
 ```
 
-The suite covers golden tests for every mined policy rule, the EV decision
-table, vocab snapping and parser guards, span classification, the calibrator
-round-trip, injected-hang recovery, the governor ladder, and the full red-team
-corpus.
-
-**Running it locally instead?** Install the pinned set on **Python 3.11–3.13**:
+To run the suite locally instead, use `requirements.txt` — it mirrors the
+`Dockerfile`'s pins — on Python 3.11–3.13:
 
 ```bash
 python3.11 -m venv .venv && .venv/bin/pip install -r requirements.txt pytest
 .venv/bin/python -m pytest tests/ -q
 ```
 
-`requirements.txt` mirrors the `Dockerfile`'s pins exactly, and the pins are
-load-bearing rather than incidental — RapidOCR's preprocessing and the
-recognizer's numerics are part of the measured result, so floating them changes
-OCR output and invalidates the reported scores. Do not install unpinned:
-`rapidocr-onnxruntime` after 1.4.4 changed the `RapidOCR(...)`
-detector-parameter API, so about a dozen OCR-path tests fail during engine
-construction before any assertion runs. Python 3.14 cannot be used at all —
-`onnxruntime==1.20.1` publishes no wheel for it.
+Those pins are load-bearing: RapidOCR's preprocessing and the recognizer's
+numerics are part of the measured result, so a different resolve changes OCR
+output. The suite prints a warning naming any package that drifts from the
+pinned set, because the resulting failures are otherwise hard to attribute.
 
 `tools/build_review_kit.py` rebuilds the evidence-aware HTML review kit from a
 specific truth/prediction/ledger/state bundle. It refuses to overwrite an
@@ -300,11 +294,13 @@ timings below are arm64.
 
 The per-PDF figure is wall-clock across the whole batch at 4 workers, which
 saturate the 4-vCPU quota (measured 400% CPU). The production 5,000-packet
-validation run — run natively at the same commit — completed in 4 h 04 m with
-zero per-case timeouts, zero retries, and zero governor engagements; its
-slowest packet took 57.0 s against the 120 s per-case deadline. These are
-Apple-silicon numbers and the evaluation hardware's per-core speed is unknown,
-which is what the batch-deadline governor above exists to absorb. The margin is
-not fragile: an earlier in-container measurement taken while the host was busy
-with concurrent work gave 4.19 s/PDF, still projecting to ~20,900 s (5.8 h),
-inside the cap with 1.43× to spare.
+validation run completed in 4 h 04 m with zero per-case timeouts, zero retries,
+and zero governor engagements; its slowest packet took 57.0 s against the 120 s
+per-case deadline.
+
+These are Apple-silicon numbers and the evaluation hardware's per-core speed is
+unknown. The batch-deadline governor absorbs that uncertainty: evaluation
+hardware would have to be about 1.75× slower per core before the run reaches
+the cap, and past that point the governor sheds tail-quality work to land
+inside it rather than be killed. A deliberately degraded measurement, taken
+with the host under heavy concurrent load, still finished in a projected 5.8 h.

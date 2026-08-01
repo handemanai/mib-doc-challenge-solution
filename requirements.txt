@@ -1,22 +1,16 @@
-# Runtime dependencies, pinned to the exact versions the scoring image builds.
-# These MUST match the `pip install` block in the Dockerfile -- the image is the
+# Runtime dependencies, pinned to the versions the scoring image builds.
+# Keep in step with the pip install block in the Dockerfile, which is the
 # authority; this file exists so a local checkout can reproduce the same
 # environment for the test suite.
 #
-# The pins are deliberate, not incidental. RapidOCR's preprocessing internals
-# and the recognizer's numerics are part of the measured result: floating any of
-# these changes OCR output and invalidates the reported scores. Two specifics
-# worth knowing before you touch them:
+# The pins are load-bearing rather than incidental. RapidOCR's image
+# preprocessing and the recognizer's numerics are part of the measured result,
+# so resolving to different versions changes OCR output and invalidates the
+# reported scores. opencv-python is listed explicitly because rapidocr
+# constrains it only as >=4.5.1.48 with no upper bound.
 #
-#   * rapidocr-onnxruntime > 1.4.4 changed the RapidOCR(...) detector-parameter
-#     API, so unpinned installs fail during engine construction, before any
-#     assertion runs.
-#   * opencv-python is a transitive dependency that rapidocr constrains only as
-#     >=4.5.1.48 with no upper bound, so an unpinned resolve floats to the
-#     newest major and changes image preprocessing.
-#
-# Requires Python 3.11-3.13: onnxruntime 1.20.1 publishes no wheel for 3.14.
-# The image itself is built on python:3.11-slim.
+# Requires Python 3.11-3.13; onnxruntime 1.20.1 publishes no wheel for 3.14.
+# The image is built on python:3.11-slim.
 
 pymupdf==1.28.0
 rapidocr-onnxruntime==1.4.4
