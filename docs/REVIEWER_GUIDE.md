@@ -1,150 +1,160 @@
-# Reviewer guide — verify the claims in 15 minutes
+# Reviewer guide — public verification map
 
-Everything in `MEMO.md` is backed by an artifact in this repository. This page
-maps each claim to the fastest way to check it.
+This guide links only evidence committed to this public repository. The dated
+performance register is a historical research log and mentions private working
+receipts that are not published; those absent receipts are not offered as proof
+of the final release.
 
-## 1. Reproduce one packet in 60 seconds
+## 1. Run the scoring contract
+
+From the solution checkout, set `CHALLENGE_DIR` to an absolute checkout of the
+official challenge repository:
 
 ```bash
-docker build -t mib-submission .
-mkdir -p /tmp/one /tmp/out && cp <train_dir>/MIB-000001.pdf /tmp/one/
-docker run --rm --network none --cpus 4 --memory 8g --read-only --tmpfs /tmp \
-  --mount type=bind,src=/tmp/one,dst=/input,readonly \
-  --mount type=bind,src=/tmp/out,dst=/output \
-  mib-submission /input /output/predictions.jsonl
+CHALLENGE_DIR=/absolute/path/to/mib-doc-challenge
+OUTPUT_DIR=/tmp/mib-review-output
+mkdir -p "$OUTPUT_DIR"
+
+docker build --platform linux/amd64 -t mib-review .
+docker run --rm --platform linux/amd64 \
+  --network none --cpus 4 --memory 8g --pids-limit 512 \
+  --read-only --tmpfs /tmp:size=2g \
+  --mount type=bind,src="$CHALLENGE_DIR/data/validation",dst=/input,readonly \
+  --mount type=bind,src="$OUTPUT_DIR",dst=/output \
+  mib-review /input /output/predictions.jsonl
+
+python3 "$CHALLENGE_DIR/scripts/validate_submission.py" \
+  --submission "$OUTPUT_DIR/predictions.jsonl" \
+  --manifest "$CHALLENGE_DIR/data/validation_manifest.csv" \
+  --require-complete
 ```
 
-Two runs produce byte-identical output; the full 5,000-case validation run is
-one uninterrupted run of the same prediction entrypoint (`scripts/predict.py`,
-which `run.sh` execs).
+The scoring image copies only `mib/`, the needed model artifacts,
+`scripts/predict.py`, `scripts/run_shard.py`, and `run.sh`. Audit and fitting
+tools are not part of the inference image. The model and dependency inventory is
+in [`NOTICE.md`](../NOTICE.md).
 
-`scripts/predict.py` also carries a batch-deadline governor (layer 3 of the
-degradation stack, beside the per-case SIGALRM and the heartbeat watchdog):
-it projects the batch finish from completion pace and sheds native-scan OCR
-budgets from not-yet-started cases only when slow evaluation hardware would
-breach the batch time limit, recovering as the projection improves. Level 0
-is byte-identical to an ungoverned run — the full-training-set gate at the
-submission commit reproduces the certified 128.916 exactly — and every
-governed case records its level in the evidence state (`governor_level`).
-Measured rung costs on the full training set: level 1 = 0.024 points,
-level 2 = 0.049 points, both with zero decision changes and no new false
-approvals. Under a 2× CPU-throttled container the governor engages within
-the first tenth of the batch, the run completes with every per-case timeout
-recovered by the full-quality retry pass, and repeat throttled runs agree on
-198/200 rows (both differences are timeout-boundary rows in the deepest
-starvation regime, which exists to replace the batch kill).
+## 2. Trace one decision
 
-## 2. The trap suite proves itself
+Append `--ledger /output/evidence.jsonl` to the container command. Each ledger
+row shows the extracted fields, evidence rank and source, baseline/native fusion,
+rank-1 payloads and conflicts, governor level, extraction attempts, and final
+decision path.
 
-`tests/redteam_corpus/` contains a self-authored corpus of every injection
-vector the field manual names but the public PDFs omit — white-on-white and
-render-mode-3 answer keys, off-crop text, zero-opacity fills, hidden OCG
-layers, QR instructions, under-image text, microtext — each paired with a
-clean twin. The pytest suite (`tests/test_redteam.py`) asserts each
-trapped packet produces output identical to its twin: the injections are not
-merely resisted, they are provably invisible to the decision path. The one
-deliberate, documented exception runs in the safe direction only: the shipped
-container enables `MIB_ANTI_ORACLE_GUARD` (`run.sh`), which demotes a
-tentative APPROVED to NEEDS_REVIEW when the packet's hidden answer key itself
-claims APPROVED and no adjudicator-note authority backs the approval. The
-planted key's adjudication is wrong in all 216 labeled occurrences, so
-agreement with it is a trap signature, not corroboration; hidden content is
-never evidence, and its presence can only move a decision away from approval,
-never toward it (zero fires across the 1,000 labeled training cases). The
-runtime contains no component that follows instructions (no LLM/VLM), so the
-instruction-injection surface this dataset targets does not exist.
+The decision route is directly inspectable:
 
-The injections are not hypothetical: 216 of the 1,000 training packets
-(21.6%) carry a hidden answer key — its adjudication wrong in all 216 — and
-our span forensics flags a similar rate (~25%) across the validation set.
-A cross-submission census shows most
-public entries follow it on 10%+ of those cases, versus 2.6% incidental
-agreement for this pipeline. On MIB-102051 a 76% majority of public entries
-deny — the hidden key's verdict — while the visibly printed registry line
-reads `Registry Status: CLEAR`.
+- [`mib/pipeline.py`](../mib/pipeline.py) extracts candidates, applies evidence
+  gates and rank-1 authority, calls deterministic adjudication, and computes
+  confidence afterward.
+- [`mib/rules.py`](../mib/rules.py) contains the field policy. Its
+  `optimal_decision` helper is an offline scoring-matrix utility and is not
+  called by the production path.
+- [`mib/two_ledger.py`](../mib/two_ledger.py) selects native fields, permits only
+  defined adverse decision transitions, and applies final consistency.
 
-## 3. The one false approval is proven irreducible, not excused
+Ordinary approvals whose emitted fields contradict policy narrow to
+`NEEDS_REVIEW`. The explicit exception is a signed, exactly case-bound rank-1
+adjudicator finding, which has higher source authority under the field manual.
+Such an approval can remain approved with its conflict recorded. A rank-1
+finding may control adjudication, but emitted fields change only when the note
+contains an explicit field correction.
 
-`experiments/CFA-MIB-000865-visible-forensic.md` documents the audit of every
-channel the true visa class could occupy on MIB-000865 — text layer,
-native-resolution OCR, hidden/off-crop text, annotations, optional-content
-groups, embedded files, cross-field consistency, near-white wash reveal — and
-its absence from all of them, plus the control packet showing that
-"find the washed clue" is itself a planted trap on approval-side packets.
+## 3. Inspect hostile-document handling
 
-## 4. Safety architecture is structural, not statistical
+The runtime has no LLM, VLM, barcode decoder, or other component that follows
+natural-language instructions. That makes prompt following unavailable, but it
+does not eliminate evidence poisoning. The relevant protections are:
 
-- Deny-direction ROI readers cannot emit approval-moving values by
-  construction (`mib/flagread.py`, `mib/worldread.py`).
-- Approval-adjacent reads face positive-evidence bars
-  (`mib/feeread.py`: "paid" requires the "un" region provably clean).
-- Every APPROVED row is re-adjudicated against the exact fields it emits
-  before it is written (`mib/two_ledger.py`,
-  `enforce_final_consistency`) — the submission cannot print an
-  approval whose own evidence demands denial or review.
-- `NEEDS_REVIEW` on evidence-withheld packets is the designed-correct output,
-  confirmed by the organizers (challenge issue #5).
+- [`mib/forensics.py`](../mib/forensics.py): span visibility, draw-order, hidden
+  optional-content, and container signals;
+- [`mib/caseid.py`](../mib/caseid.py): packet identity resolution;
+- [`mib/extract.py`](../mib/extract.py): foreign body-case detection used by
+  the pipeline's page rejection gate;
+- [`mib/pipeline.py`](../mib/pipeline.py): hidden-span masking before image
+  enhancement and authority-aware evidence selection;
+- [`tests/redteam_corpus/`](../tests/redteam_corpus/): twelve tracked clean and
+  hostile PDFs;
+- [`tests/test_redteam.py`](../tests/test_redteam.py): clean-twin field and
+  adjudication checks plus hidden-token leak checks;
+- [`tests/test_untrusted_container_guard.py`](../tests/test_untrusted_container_guard.py)
+  and [`tests/test_note_authority_adversarial.py`](../tests/test_note_authority_adversarial.py):
+  untrusted text-layer and forged-note controls.
 
-## 5. Honest measurement
+Hidden answer-key verdicts are excluded from field extraction and do not change
+adjudication. Hidden-span presence remains visible in the ledger and may enter
+confidence features; the verdict itself is not decision evidence. The red-team
+claim is scoped accordingly: hostile twins preserve emitted fields and
+adjudication, except the intentionally evidence-withheld case, rather than a
+blanket byte-identity claim about every ledger or confidence field.
 
-Tuning used a fixed 799-case split; the 201-case holdout was read only at
-milestones. Negative results are retained rather than discarded:
-approaches measured and rejected include an ML hedge-resolution gate (−4
-OOF), a +90-raw-EV approval expansion declined for manufacturing systematic
-false approvals, and a trained OCR-correction transducer that ships disabled
-after losing on the sealed holdout under its pre-registered gate.
+## 4. Inspect safety boundaries
 
-`docs/PERFORMANCE_OPPORTUNITY_REGISTER_2026-07-26.md` is the dated register
-of the opportunity portfolio with each item's measured ceiling — including
-the ones we chose not to take and why; its closing addendum (2026-07-31)
-records the final measured declines, summarized in section 6 below.
-`experiments/CFA-MIB-000865-visible-forensic.md` is the full irreducibility
-forensic behind section 3.
+- [`mib/flagread.py`](../mib/flagread.py),
+  [`mib/worldread.py`](../mib/worldread.py), and
+  [`mib/sponsorread.py`](../mib/sponsorread.py) emit only adverse evidence.
+- [`mib/feeread.py`](../mib/feeread.py) requires positive visual evidence before
+  an approval-adjacent `paid` read.
+- [`mib/noteread.py`](../mib/noteread.py) recovers only deny/review directions by
+  default; approval recovery remains disabled.
+- [`tests/test_final_consistency.py`](../tests/test_final_consistency.py) covers
+  both ordinary contradiction demotion and the rank-1 exception.
+- [`tests/test_native_sanitization.py`](../tests/test_native_sanitization.py) and
+  [`tests/test_two_ledger_gates.py`](../tests/test_two_ledger_gates.py) cover
+  native-field validity and monotone fusion.
 
-## 6. Appendix — negative results and declined techniques
+The one development false approval is documented in
+[`experiments/CFA-MIB-000865-visible-forensic.md`](../experiments/CFA-MIB-000865-visible-forensic.md).
+That document establishes absence across the channels actually audited; it does
+not claim metaphysical irreducibility or private-set validation.
 
-The thesis this appendix documents: the remaining gap between this submission's
-score and 150 is measured to be dominated by information physically absent from
-the packets, and every shortcut across it manufactures catastrophic false
-approvals. Each technique below was built, measured, and declined, with the
-numbers that forced the decision.
+## 5. Inspect completion and runtime controls
 
-**Learned NEEDS_REVIEW resolvers — the field's dominant technique.** Four
-public entries score above our train number by applying a learned review
-resolver to our own published baseline (commit `4b37a78`, MIT, attributed). We
-replicated the approach against our own 258 eligible hedges (closing receipt,
-2026-07-31): applied in-sample it shows **+4.83** total points at **13**
-catastrophic false approvals; under honest 5-fold out-of-fold evaluation —
-their exact architecture, three fold-seeds — it yields **+1.35 to +2.75**
-total at **3–25** new false approvals per 1,000 cases depending on guard. No
-operating point is false-approval-clean: the approve-only conf ≥ 0.695 guard
-that shows zero false approvals in-sample mints 3–8 out-of-sample. Declined.
-Every NEEDS_REVIEW we emit is a case where the visible evidence genuinely
-under-determines the outcome.
+- [`scripts/run_shard.py`](../scripts/run_shard.py) applies per-case deadlines,
+  flushes and `fsync`s every state, and actively requests worker replacement
+  after 48 cases by default.
+- [`scripts/predict.py`](../scripts/predict.py) implements the heartbeat
+  watchdog, unfinished-tail resume, retry budget, completeness fallback, atomic
+  prediction refresh, and batch governor.
+- [`tests/test_watchdog.py`](../tests/test_watchdog.py) covers worker death,
+  lower-level hangs, and one-case recycling identity.
+- [`tests/test_governor.py`](../tests/test_governor.py) covers governor
+  transitions and level-0 equivalence.
+- [`tests/test_merge_case_retries.py`](../tests/test_merge_case_retries.py)
+  covers retry selection and merge behavior.
 
-**Hedge conversion by confidence threshold.** Converting hedges above a
-confidence cut measures **+2.48** on train at **34** false approvals; the
-coarser remap NR & conf < 0.5 → APPROVED nets **+0.075** while moving false
-approvals from 1 to 43. Both declined.
+Determinism is claimed only for fixed inputs, image, configuration, and governor
+behavior. At governor level 0, the path is output-identical to the ungoverned
+path. A changing governor schedule or deep timeout-boundary stress may send
+different cases through reduced OCR work, so cross-schedule byte identity is
+not claimed.
 
-**Approval heads for unread fee/flags.** A fee dark head measures **+0.946**
-while moving false approvals from 1 to 3; a flags head (never shipped;
-reconstructed for measurement) **+0.65–0.77** at 1 → 11. Both sit behind
-default-off flags; both OFF.
+## 6. Inspect test coverage
 
-**Calibration transforms.** The fitted temperature is the identity and every
-transform family is negative under cross-validation; the oracle isotonic bound
-is **+0.049**. The calibration head is at its measured ceiling.
+```bash
+python3.11 -m venv .venv
+.venv/bin/pip install -r requirements.txt pytest
+MIB_CHALLENGE_DIR="$CHALLENGE_DIR" .venv/bin/python -m pytest tests/ -q
+```
 
-**Info-bound proofs for the residual.** The residual is absence, not
-misreading. Of 35 deny-hedge flag cases, 14 have no scan surface at all; on
-the 21 where the ROI gate was attempted and failed, a truth-word template
-sweep peaks at 0.41–0.61 versus 0.38–0.63 for truth-none controls (n = 21 vs
-30) — indistinguishable from noise. POL-12 dual fee-clearance is
-generator-impossible: 0/1,000 training packets carry two fee-bearing
-surfaces, and an exhaustive 4,096-conjunction zero-denial search returns
-empty. A 40-case hedge audit finds 37 information-absent, 3 policy-correct
-declines on untrusted surfaces (SAMPLE DENIAL, ARCHIVE, hidden text), and 0
-clean misreads. The fee residual's mechanism is absent waiver evidence —
-86/123 fee misses are truth "waived" with the waiver-code page absent, and
-the candidate pool is empty on 96/123 — not "unreadable unknown".
+Data-backed tests need the challenge checkout, and provenance tests need Git.
+When those prerequisites are absent, the harness emits controlled skips. The
+test result should therefore be reported with its environment and skip count,
+not as a context-free pass number.
+
+## 7. Final identity check
+
+`SUBMISSION.md` intentionally contains source and prediction-hash placeholders
+while the final release is being assembled. A release is not complete until
+both are replaced with the exact clean-run identities. This check must print no
+matches:
+
+```bash
+rg -n 'FINAL_RELEASE_SOURCE_SHA|FINAL_PREDICTIONS_SHA256' \
+  README.md SUBMISSION.md MEMO.md docs/
+```
+
+The public proof surface is therefore: source, tests, committed adversarial
+corpus, the visible-evidence forensic, dependency/model provenance, the final
+public Git commit, and the submitted prediction hash. Private review kits,
+cached states, or unpublished experiment receipts are not required to accept
+the public claims above.

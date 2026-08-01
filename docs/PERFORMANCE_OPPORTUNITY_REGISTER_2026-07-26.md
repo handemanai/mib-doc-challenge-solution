@@ -1,5 +1,12 @@
 # MIB Performance Opportunity Register
 
+> **Historical research log, not final-release proof.** This dated working
+> register preserves hypotheses, gates, and terminal dispositions from private
+> development. Some referenced receipts and intermediate files are intentionally
+> absent from the public repository. An absent artifact is unavailable evidence,
+> not a public verification claim. Current release claims and publicly tracked
+> evidence are mapped in [`REVIEWER_GUIDE.md`](REVIEWER_GUIDE.md).
+
 Date opened: 2026-07-26
 Program objective: win the MIB document challenge with a visible-evidence,
 private-test-resilient, reproducible system.

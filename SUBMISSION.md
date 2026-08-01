@@ -1,85 +1,95 @@
 # MIB Doc Challenge — Submission
 
-- **Solution repository (public, contains `Dockerfile`):** <https://github.com/handemanai/mib-doc-challenge-solution>
+- **Solution repository:** <https://github.com/handemanai/mib-doc-challenge-solution>
 - **Candidate:** handemanai
 
-## What this is
+## Summary
 
-An offline, CPU-only adjudication engine for the MIB intergalactic intake desk.
-It reads adversarial PDF case packets, extracts the nine applicant fields, and
-recommends `APPROVED` / `DENIED` / `NEEDS_REVIEW` with a calibrated confidence.
-Every decision is backed by a per-case evidence ledger.
+This is an offline, CPU-only adjudication engine. It extracts the nine required
+fields from adversarial PDF packets and emits `APPROVED`, `DENIED`, or
+`NEEDS_REVIEW` plus calibrated confidence. Decisions use deterministic evidence
+and policy rules. Expected value is used only for offline evaluation of proposed
+policy changes; confidence is computed after the decision.
 
-See `MEMO.md` for the full technical write-up (approach, negative results,
-failure modes, and what another week buys).
+The runtime contains no LLM, VLM, cloud OCR, network service, or component that
+follows natural-language instructions. That removes prompt following as an
+execution path, but it does not make hostile documents harmless. Hidden and
+visible evidence poisoning are addressed with PDF forensics, hidden-span masking,
+case/page binding, ranked evidence, source-specific authority, and conservative
+review gates. A hidden answer-key verdict does not change emitted fields or
+adjudication.
 
-## Runtime contract compliance
+## Runtime contract
 
-- Runs under `--network none --cpus 4 --memory 8g --read-only --tmpfs /tmp`.
-- Entrypoint accepts `<input_pdf_dir> <output_predictions_path>`.
-- No LLM, VLM, cloud OCR, or network service at inference time. OCR is RapidOCR
-  (PP-OCRv4 mobile detector + en_PP-OCRv5 mobile recognizer, ONNX); everything
-  else is classical CV, deterministic rules, and an optional candidate-trained
-  2.6M-parameter character transducer that is disabled by default (see MEMO.md)
-  and whose trie-constrained decoder cannot emit values outside the legal field
-  vocabularies. Nothing in the runtime follows instructions, so the injection
-  surface the dataset targets does not exist in this system.
-- Measured under those exact flags, and re-verified at the submission commit on
-  the image built from a clean clone of the public repository: **0.27 GiB
-  image** (4 GiB cap), **12 MB of model artifacts** (1 GiB total / 250 MiB
-  per-artifact caps), **3.3 GiB peak RSS** (8 GiB cap), **3.43s/PDF** (6s
-  budget) projecting to **~17,100s (4.8h)** against the 30,000s limit — both
-  time margins 1.75×. The four workers saturate the 4-vCPU quota (measured
-  400% CPU). Slowest packet in the corpus: 62.7s against the 120s per-case
-  deadline.
-- Deterministic seeds; two clean-checkout runs produce byte-identical output.
-- Per-case deadlines, a parent heartbeat watchdog, and planned worker recycling
-  keep a single packet or a native-library process-lifetime fault from
-  preventing validator-safe output. Completed rows are durable before a worker
-  is replaced, and the scorer-facing file is refreshed during long runs.
+- Entrypoint: `<input_pdf_dir> <output_predictions_path>`.
+- Verified run flags: `--platform linux/amd64 --network none --cpus 4
+  --memory 8g --pids-limit 512 --read-only --tmpfs /tmp:size=2g`.
+- Runtime stack: RapidOCR/ONNX plus classical PDF, image, parsing, and policy
+  code. The optional candidate-trained character transducer ships disabled.
+- Last completed release-lineage measurement: 3.43 s/PDF, approximately 17,100
+  seconds for 5,000 PDFs, 3.3 GiB peak RSS, 0.30 GiB image, 12 MB total model
+  artifacts, and 7.9 MB largest artifact.
+- The uninterrupted 5,000-case run completed in 4 h 04 m with zero per-case
+  timeouts, zero retries, and zero governor engagements.
+- Each case has a deadline; a parent heartbeat handles lower-level hangs; active
+  worker recycling replaces each worker after 48 cases; and the batch governor
+  can reduce future OCR work if projected runtime approaches the hard limit.
+- At governor level 0, fixed inputs/configuration, and the same image, repeated
+  runs are output-identical. Determinism is not claimed across different
+  governor schedules or timeout-boundary stress.
 
-## Reproduce
+## Reproduce and validate
 
-Run from a checkout with the challenge repository's `data/` available alongside
-(clone `github.com/8090-inc/mib-doc-challenge` for `data/validation`,
-`data/validation_manifest.csv`, and `scripts/validate_submission.py`), and
-create the output directory first: `mkdir -p /tmp/mib-out`.
+Set `CHALLENGE_DIR` to an absolute checkout of the official challenge repository.
+Run these commands from this solution repository:
 
 ```bash
-docker build -t mib-submission .
-docker run --rm --network none --cpus 4 --memory 8g --read-only \
-  --tmpfs /tmp --mount type=bind,src="$PWD/data/validation",dst=/input,readonly \
-  --mount type=bind,src=/tmp/mib-out,dst=/output \
+CHALLENGE_DIR=/absolute/path/to/mib-doc-challenge
+OUTPUT_DIR=/tmp/mib-submission-output
+mkdir -p "$OUTPUT_DIR"
+
+docker build --platform linux/amd64 -t mib-submission .
+docker run --rm --platform linux/amd64 \
+  --network none --cpus 4 --memory 8g --pids-limit 512 \
+  --read-only --tmpfs /tmp:size=2g \
+  --mount type=bind,src="$CHALLENGE_DIR/data/validation",dst=/input,readonly \
+  --mount type=bind,src="$OUTPUT_DIR",dst=/output \
   mib-submission /input /output/predictions.jsonl
-python3 scripts/validate_submission.py \
-  --submission /tmp/mib-out/predictions.jsonl \
-  --manifest data/validation_manifest.csv
+
+python3 "$CHALLENGE_DIR/scripts/validate_submission.py" \
+  --submission "$OUTPUT_DIR/predictions.jsonl" \
+  --manifest "$CHALLENGE_DIR/data/validation_manifest.csv" \
+  --require-complete
 ```
 
-## Predictions
+The submitted prediction file lives in the challenge repository under
+`submissions/handemanai/`; it is not duplicated here.
 
-The submitted `predictions.jsonl` is not in this repository — it lives in the
-challenge repository under `submissions/handemanai/`, together with the memo and
-the provenance record that ties those 5,000 rows to a commit of this repository.
-Reproducing the command above on `data/validation` regenerates it; it passes
-`scripts/validate_submission.py` against `data/validation_manifest.csv` with
-5,000 records and no missing cases.
+## Final release identity
 
-## Provenance
+The release coordinator must replace the following two explicit placeholders
+after the final clean-image run and before submission. They are intentionally not
+presented as completed provenance:
 
-The submitted `predictions.jsonl` was generated at commit `1db4721` of this
-repository in one uninterrupted 4 h 04 m run at 4 workers (zero per-case
-timeouts, zero retries; sha256
-`6d51c904f006b80de9a7140c27ac8852776fd12b11b49f34a25214101ebe374a`).
-Relative to the 2026-07-31 file generated at `53dbe7a`, exactly four rows
-changed — the four approvals demoted by the anti-oracle guard
-(`MIB-101326`, `MIB-101982`, `MIB-102278`, `MIB-104773`, each
-APPROVED → NEEDS_REVIEW with every extracted field unchanged); the other
-4,996 rows are byte-identical. The code delta `53dbe7a..1db4721` is the
-anti-oracle guard enablement, the batch-deadline governor (inert on
-hardware inside the batch budget: the full-training-set gate at this
-commit reproduces the certified 128.916 byte-identically with zero
-governor engagements), and documentation. Nothing that produces predictions has
-changed since, verifiable with
-`git diff 1db4721..HEAD -- mib scripts models tools Dockerfile run.sh`
-(empty output), so a rebuild at any later commit reproduces the same rows.
+- `FINAL_RELEASE_SOURCE_SHA` — public solution commit used to build the final
+  image.
+- `FINAL_PREDICTIONS_SHA256` — SHA-256 of the final 5,000-row
+  `predictions.jsonl`.
+
+The most recent completed predecessor artifact contained 5,000 valid records,
+zero missing cases, and had SHA-256
+`6d51c904f006b80de9a7140c27ac8852776fd12b11b49f34a25214101ebe374a`.
+That predecessor is a rollback artifact, not the identity claim for the final
+release.
+
+## Authorship
+
+I am a practicing surgeon, not a software engineer, and this is an experiment in
+agentic coding rather than a job application. AI wrote nearly all of the code. I
+set the goals, evidence standards, experiment boundaries, and promotion
+decisions, including rejecting apparent score improvements that created unsafe
+or poorly generalizing behaviour. I am stating that division honestly so the
+work can be judged for what it is.
+
+See `MEMO.md` for the technical argument and `docs/REVIEWER_GUIDE.md` for a map
+of claims to public source and tests.
