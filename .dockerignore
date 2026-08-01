@@ -1,4 +1,4 @@
-# The image COPYs only mib/, models/, scripts/predict.py, run_shard.py, run.sh.
+# The image COPYs only runtime code/models plus repository license notices.
 # Keep build context minimal and never ship dev-time tooling, tests, or notes.
 tests/
 tools/
