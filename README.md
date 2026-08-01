@@ -271,4 +271,7 @@ validation run — run natively at the same commit — completed in 4 h 04 m wit
 zero per-case timeouts, zero retries, and zero governor engagements; its
 slowest packet took 57.0 s against the 120 s per-case deadline. These are
 Apple-silicon numbers and the evaluation hardware's per-core speed is unknown,
-which is what the batch-deadline governor above exists to absorb.
+which is what the batch-deadline governor above exists to absorb. The margin is
+not fragile: an earlier in-container measurement taken while the host was busy
+with concurrent work gave 4.19 s/PDF, still projecting to ~20,900 s (5.8 h),
+inside the cap with 1.43× to spare.
