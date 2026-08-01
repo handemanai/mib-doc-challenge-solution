@@ -188,10 +188,10 @@ different machine:
 | Model artifacts | 12 MB total; 7.9 MB largest |
 | Prediction file | approximately 1.6 MB |
 
-The evaluator target is `linux/amd64`; the reproduction command builds and runs
-that platform explicitly. The timing run was hosted on Apple silicon, while an
-AMD64 image build and sample-output check were performed separately. No claim is
-made that ARM64 and AMD64 have identical throughput.
+The release image was verified for `linux/amd64`; the reproduction command builds
+and runs that platform explicitly. The pinned base is a multi-architecture index,
+so the same Dockerfile can also be built natively on Apple silicon. No claim is
+made that ARM64 and AMD64 have identical output or throughput.
 
 ## Repository map
 
