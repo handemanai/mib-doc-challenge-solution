@@ -67,7 +67,7 @@ Reproducing the command above on `data/validation` regenerates it; it passes
 
 ## Provenance
 
-The submitted `predictions.jsonl` was generated at commit `fd6bbf6` of this
+The submitted `predictions.jsonl` was generated at commit `1db4721` of this
 repository in one uninterrupted 4 h 04 m run at 4 workers (zero per-case
 timeouts, zero retries; sha256
 `6d51c904f006b80de9a7140c27ac8852776fd12b11b49f34a25214101ebe374a`).
@@ -75,11 +75,11 @@ Relative to the 2026-07-31 file generated at `53dbe7a`, exactly four rows
 changed — the four approvals demoted by the anti-oracle guard
 (`MIB-101326`, `MIB-101982`, `MIB-102278`, `MIB-104773`, each
 APPROVED → NEEDS_REVIEW with every extracted field unchanged); the other
-4,996 rows are byte-identical. The code delta `53dbe7a..fd6bbf6` is the
+4,996 rows are byte-identical. The code delta `53dbe7a..1db4721` is the
 anti-oracle guard enablement, the batch-deadline governor (inert on
 hardware inside the batch budget: the full-training-set gate at this
 commit reproduces the certified 128.916 byte-identically with zero
 governor engagements), and documentation. Nothing that produces predictions has
 changed since, verifiable with
-`git diff fd6bbf6..HEAD -- mib scripts models tools Dockerfile run.sh`
+`git diff 1db4721..HEAD -- mib scripts models tools Dockerfile run.sh`
 (empty output), so a rebuild at any later commit reproduces the same rows.
