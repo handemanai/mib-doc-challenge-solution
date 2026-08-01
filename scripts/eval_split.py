@@ -43,8 +43,9 @@ def extract_states(pdfs, workers=6):
     procs = []
     for i in range(workers):
         lst = tmp / f"shard{i}.txt"
-        lst.write_text("\n".join(str(p) for p in pdfs[i::workers]))
-        env = dict(os.environ, OMP_NUM_THREADS="1")
+        lst.write_text(json.dumps([str(p) for p in pdfs[i::workers]]))
+        env = dict(os.environ, OMP_NUM_THREADS="1",
+                   OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1")
         procs.append(subprocess.Popen(
             [sys.executable, str(RUN_SHARD), str(lst), str(tmp / f"state{i}.jsonl")],
             env=env))

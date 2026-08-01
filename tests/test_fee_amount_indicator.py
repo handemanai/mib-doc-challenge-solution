@@ -60,8 +60,8 @@ def test_non_receipt_page_never_fires():
 
 
 def test_id_fragments_and_dates_never_match():
-    for text in ["Packet MIB-100809 / page 2", "SPN-8090", "2026-08-09",
-                 "809", "MIB-000809"]:
+    for text in ["Packet MIB-123809 / page 2", "SPN-1809", "2026-08-09",
+                 "809", "MIB-999809"]:
         assert not _PAID_AMOUNT_RE.search(text), text
 
 

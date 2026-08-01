@@ -193,6 +193,34 @@ IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}")
 WORKER_RECYCLE_EXIT_CODE = 75
 
 
+def _worker_env(**overrides):
+    """Child environment with one native math thread per worker.
+
+    The official run.sh pins these variables for the whole container.  Pinning
+    again at the subprocess boundary also protects direct predict.py callers
+    (tests and reviewer reproductions) from a host's inherited BLAS settings.
+    """
+    return dict(os.environ, OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1",
+                MKL_NUM_THREADS="1", **overrides)
+
+
+def _write_path_list(path, paths):
+    """Serialize worker paths without treating whitespace as a delimiter."""
+    Path(path).write_text(json.dumps([str(item) for item in paths]))
+
+
+def _read_heartbeat(path):
+    """Return the exact active path from a JSON or legacy heartbeat."""
+    if not Path(path).exists():
+        return None
+    raw = Path(path).read_text()
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        value = raw.strip()
+    return value if isinstance(value, str) and value else None
+
+
 class Shard:
     def __init__(self, tmp, idx, pdfs):
         self.tmp, self.idx = tmp, idx
@@ -213,12 +241,12 @@ class Shard:
         self.gen += 1
         self.pdfs = list(pdfs)
         slice_file = self.tmp / f"shard{self.idx}_g{self.gen}.txt"
-        slice_file.write_text("\n".join(pdfs))
+        _write_path_list(slice_file, pdfs)
         state_file = self.tmp / f"state{self.idx}_g{self.gen}.jsonl"
         self.state_files.append(state_file)
         if self.hb.exists():
             self.hb.unlink()
-        env = dict(os.environ, OMP_NUM_THREADS="1")
+        env = _worker_env()
         self.proc = subprocess.Popen(
             [sys.executable, str(Path(__file__).resolve().parent / "run_shard.py"),
              str(slice_file), str(state_file), str(self.hb)],
@@ -248,7 +276,7 @@ class Shard:
         if self.proc.poll() is None:
             self.proc.kill()
             self.proc.wait()
-        culprit = self.hb.read_text().strip() if self.hb.exists() else None
+        culprit = _read_heartbeat(self.hb)
         done = self._completed_ids()
         remaining = [p for p in self.pdfs
                      if Path(p).stem not in done and p != culprit]
@@ -696,6 +724,24 @@ def _retry_log(message):
         pass
 
 
+def _checkpoint_predictions(states, out):
+    """Best-effort atomic checkpoint; retain the last good file on I/O error."""
+    try:
+        _write_predictions(states, batch_epoch(states), out,
+                           batch_frequent_sponsors(states))
+        return True
+    except OSError as exc:
+        # Checkpoints reduce damage from a later hard batch-limit kill.  They
+        # must never replace the primary computation failure boundary: a final
+        # durable write is still required after workers finish.
+        try:
+            print(f"[flush] checkpoint failed, will retry: {exc!r}",
+                  file=sys.stderr, flush=True)
+        except Exception:
+            pass
+        return False
+
+
 def _run_retry_worker(command, env, timeout):
     """Run one retry in its own process group and kill the whole group on cap."""
     proc = subprocess.Popen(
@@ -773,12 +819,12 @@ def _retry_failed_states(states, pdfs, tmp, batch_started):
             list_file = tmp / f"retry_{ordinal}.txt"
             state_file = tmp / f"retry_{ordinal}.jsonl"
             hb_file = tmp / f"retry_{ordinal}.hb"
-            list_file.write_text(pdf + "\n")
-            env = dict(os.environ, OMP_NUM_THREADS="1",
-                       MIB_EXTRACTION_ATTEMPT="2",
-                       # Retries are few and budget-clamped; they always run
-                       # at full quality regardless of the governor level.
-                       MIB_GOVERNOR_FORCE_LEVEL="0")
+            _write_path_list(list_file, [pdf])
+            env = _worker_env(
+                MIB_EXTRACTION_ATTEMPT="2",
+                # Retries are few and budget-clamped; they always run at full
+                # quality regardless of the governor level.
+                MIB_GOVERNOR_FORCE_LEVEL="0")
             remaining = retry_deadline - time.monotonic()
             timeout = max(0.1, min(RETRY_CASE_TIMEOUT, remaining))
             command = [sys.executable,
@@ -920,15 +966,7 @@ def main():
     # The first flush happens immediately: a kill before the first periodic
     # flush must find a full conservative row set, not an empty file.
     initial = _collect_states(shards, pdfs, complete=True)
-    try:
-        _write_predictions(initial, batch_epoch(initial), out,
-                           batch_frequent_sponsors(initial))
-    except OSError as exc:
-        # A transient write error (e.g. a momentary disk/tmpfs hiccup) on the
-        # very first flush must not abort the whole run before the periodic
-        # flushes and final write get their chance at the contract path.
-        print(f"[flush] initial flush failed, will retry: {exc!r}",
-              file=sys.stderr, flush=True)
+    _checkpoint_predictions(initial, out)
     last_flush = time.time()
     governor = _Governor(tmp, len(pdfs), batch_started,
                          enabled=os.environ.get("MIB_GOVERNOR", "1") == "1")
@@ -940,8 +978,7 @@ def main():
         governor.update(counter.poll())
         if time.time() - last_flush >= FLUSH_SECS:
             interim = _collect_states(shards, pdfs, complete=True)
-            _write_predictions(interim, batch_epoch(interim), out,
-                               batch_frequent_sponsors(interim))
+            _checkpoint_predictions(interim, out)
             last_flush = time.time()
 
     states = _collect_states(shards, pdfs, complete=True)

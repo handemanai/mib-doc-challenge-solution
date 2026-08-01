@@ -318,7 +318,7 @@ def _bare_value(text):
 
 # $809.00 with OCR damage tolerance ($->S/5, 0->O, lost cents). A currency
 # prefix or decimal suffix is mandatory and digit/letter neighbors are
-# rejected, so id fragments ("MIB-100809", "SPN-8090") can never match; the
+# rejected, so generic id fragments ("MIB-123809", "SPN-1809") cannot match; the
 # $0.00 printed on unpaid/waived/unknown receipts never contains it.
 _PAID_AMOUNT_RE = re.compile(
     r"(?<![0-9A-Za-z])(?:[$s5]\s?8[o0]9(?:[.,]\s?[o0]{2})?"

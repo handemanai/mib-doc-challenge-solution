@@ -468,8 +468,16 @@ def test_binder_pixmatch_constants_match_runtime_contract():
         rules.HARD_EMBARGO_WORLDS | rules.SOFT_EMBARGO_WORLDS)
 
 
-def test_runtime_manifest_includes_image_view_registry_module():
-    assert "mib/view_registry.py" in EXPECTED_RUNTIME_REPO_PATHS
+def test_runtime_manifest_matches_the_docker_copied_source_and_model_tree():
+    copied_tree = {
+        str(path.relative_to(ROOT))
+        for directory in (ROOT / "mib", ROOT / "models")
+        for path in directory.iterdir()
+        if path.is_file() and path.suffix in {".py", ".json", ".onnx", ".npz"}
+    }
+    manifested_tree = set(EXPECTED_RUNTIME_REPO_PATHS) - {
+        "run.sh", "scripts/predict.py", "scripts/run_shard.py"}
+    assert manifested_tree == copied_tree
 
 
 def test_evidence_accepts_selected_baseline_sponsor_visa_and_date_pool():

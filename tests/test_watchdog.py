@@ -178,6 +178,78 @@ def test_campaign_timeout_defaults_are_synchronized(monkeypatch):
         "MIB_NATIVE_SCAN_OCR"] == "1"
 
 
+def test_worker_environment_overrides_inherited_native_thread_counts(
+        monkeypatch):
+    monkeypatch.setenv("OMP_NUM_THREADS", "12")
+    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "11")
+    monkeypatch.setenv("MKL_NUM_THREADS", "10")
+    env = PREDICT_MODULE._worker_env(MIB_EXTRACTION_ATTEMPT="2")
+    assert {key: env[key] for key in (
+        "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"
+    )} == {
+        "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+    }
+    assert env["MIB_EXTRACTION_ATTEMPT"] == "2"
+
+
+def test_worker_path_transport_preserves_spaces_newlines_and_heartbeat(
+        monkeypatch, tmp_path):
+    paths = [
+        tmp_path / "directory with spaces" / "MIB-000001.pdf",
+        tmp_path / "directory\nwith newline" / "MIB-000002.pdf",
+    ]
+    listing = tmp_path / "paths.json"
+    state_path = tmp_path / "states.jsonl"
+    heartbeat = tmp_path / "heartbeat"
+    PREDICT_MODULE._write_path_list(listing, paths)
+    seen = []
+
+    def extract(path):
+        seen.append(path)
+        return {"case_id": Path(path).stem, "pools": {}, "doc_notes": {}}
+
+    monkeypatch.setattr(RUN_SHARD_MODULE, "extract_state", extract)
+    monkeypatch.setattr(RUN_SHARD_MODULE.os, "fsync", lambda descriptor: None)
+    assert RUN_SHARD_MODULE.main(
+        str(listing), str(state_path), str(heartbeat)) == 0
+    assert seen == [str(path) for path in paths]
+    assert PREDICT_MODULE._read_heartbeat(heartbeat) == str(paths[-1])
+    rows = [json.loads(line) for line in state_path.read_text().splitlines()]
+    assert [row["case_id"] for row in rows] == ["MIB-000001", "MIB-000002"]
+
+
+def test_legacy_worker_path_list_preserves_spaces(tmp_path):
+    paths = [tmp_path / "one folder" / "MIB-000001.pdf",
+             tmp_path / "two folder" / "MIB-000002.pdf"]
+    listing = tmp_path / "legacy.txt"
+    listing.write_text("\n".join(str(path) for path in paths))
+    assert RUN_SHARD_MODULE._read_pdf_list(listing) == [str(p) for p in paths]
+
+
+def test_governed_timeout_records_the_actual_active_ceiling(
+        monkeypatch, tmp_path):
+    pdf = tmp_path / "MIB-000001.pdf"
+    listing = tmp_path / "paths.json"
+    state_path = tmp_path / "states.jsonl"
+    PREDICT_MODULE._write_path_list(listing, [pdf])
+    (tmp_path / RUN_SHARD_MODULE.GOVERNOR_LEVEL_FILE).write_text("3")
+    alarms = []
+
+    def timeout(_path):
+        raise RUN_SHARD_MODULE.CaseTimeout()
+
+    monkeypatch.setattr(RUN_SHARD_MODULE, "extract_state", timeout)
+    monkeypatch.setattr(RUN_SHARD_MODULE.signal, "alarm", alarms.append)
+    monkeypatch.setattr(RUN_SHARD_MODULE.os, "fsync", lambda descriptor: None)
+    assert RUN_SHARD_MODULE.main(str(listing), str(state_path)) == 0
+    state = json.loads(state_path.read_text())
+    assert alarms == [60, 0]
+    assert state["error"] == "per_case_timeout(60s)"
+    assert state["extraction"]["attempts"][-1]["error"] == \
+        "per_case_timeout(60s)"
+
+
 def test_planned_recycle_fsyncs_completed_rows_before_tail_resume(
         monkeypatch, tmp_path):
     paths = [tmp_path / f"MIB-00000{number}.pdf"

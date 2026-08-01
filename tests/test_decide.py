@@ -75,6 +75,13 @@ def test_missing_arrival_date_reviews():
     assert dec(f) == "NEEDS_REVIEW"
 
 
+def test_non_calendar_arrival_date_never_reaches_output():
+    f = dict(ALL, arrival_date=("2026-02-30", "intake", 95.0, 2))
+    output, _ = decide(state(f))
+    assert output["arrival_date"] == "2026-05-01"
+    assert output["adjudication"] == "NEEDS_REVIEW"
+
+
 def test_hidden_only_sponsor_reviews():
     # sponsor absent from visible, present in hidden text, non-DIP -> review
     f = {k: v for k, v in ALL.items() if k != "sponsor_id"}

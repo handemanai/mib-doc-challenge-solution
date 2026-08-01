@@ -148,18 +148,40 @@ def _test_hang(mode):
         time.sleep(0.05)
 
 
+def _read_pdf_list(list_file):
+    """Read the supervisor's lossless path list, with legacy compatibility.
+
+    JSON is used by current callers because whitespace is legal in a path and
+    a newline-delimited transport cannot represent a filename containing a
+    newline.  Older newline-delimited lists remain accepted, but each line is
+    treated as one path instead of being split on arbitrary whitespace.
+    """
+    raw = Path(list_file).read_text()
+    try:
+        paths = json.loads(raw)
+    except json.JSONDecodeError:
+        return [line for line in raw.splitlines() if line]
+    if not isinstance(paths, list) or not all(isinstance(path, str)
+                                               for path in paths):
+        raise ValueError("PDF list must be a JSON array of paths")
+    return paths
+
+
 def main(list_file, state_out, heartbeat=None):
-    pdfs = Path(list_file).read_text().split()
+    pdfs = _read_pdf_list(list_file)
     hb = Path(heartbeat) if heartbeat else None
     signal.signal(signal.SIGALRM, _on_alarm)
 
     with open(state_out, "w") as f:
         for i, pdf in enumerate(pdfs):
             if hb:
-                hb.write_text(pdf)
+                # JSON preserves every legal path character for the parent
+                # watchdog, including leading/trailing spaces and newlines.
+                hb.write_text(json.dumps(pdf))
             level = _governor_level(state_out)
             _apply_governor_env(level)
-            signal.alarm(GOVERNOR_CASE_TIMEOUT.get(level, CASE_TIMEOUT))
+            case_timeout = GOVERNOR_CASE_TIMEOUT.get(level, CASE_TIMEOUT)
+            signal.alarm(case_timeout)
             os.environ["MIB_ACTIVE_CASE"] = Path(pdf).stem
             case_started = time.monotonic()
             try:
@@ -183,7 +205,7 @@ def main(list_file, state_out, heartbeat=None):
                 else:
                     state["extraction"] = _provenance("success")
             except CaseTimeout:
-                state = _empty_state(pdf, f"per_case_timeout({CASE_TIMEOUT}s)")
+                state = _empty_state(pdf, f"per_case_timeout({case_timeout}s)")
             except Exception as exc:
                 state = _empty_state(pdf, _error_summary(exc))
             finally:

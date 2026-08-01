@@ -82,6 +82,37 @@ def test_collect_states_keys_by_source_stem(tmp_path):
     assert by_stem["scan_b"]["case_id_provenance"]["source"] == "backfill_stub"
 
 
+def test_collect_states_has_completion_timing_independent_order(tmp_path):
+    pdfs = [str(tmp_path / f"MIB-00000{i}.pdf") for i in range(1, 5)]
+    # Workers finish in the opposite order, and their append-only rows are
+    # materialized in different files. Output remains the receipt's declared
+    # shard order: shard 0's slice, then shard 1's slice.
+    shard0 = _FakeShard([_stub_state("MIB-000003"),
+                         _stub_state("MIB-000001")])
+    shard1 = _FakeShard([_stub_state("MIB-000004"),
+                         _stub_state("MIB-000002")])
+    shard0.materialize(tmp_path, "state0.jsonl")
+    shard1.materialize(tmp_path, "state1.jsonl")
+    states = predict._collect_states([shard0, shard1], pdfs, complete=True)
+    assert [state["case_id"] for state in states] == [
+        "MIB-000001", "MIB-000003", "MIB-000002", "MIB-000004"]
+
+
+def test_checkpoint_write_error_retains_last_good_output_and_returns_false(
+        monkeypatch, tmp_path):
+    states = [_stub_state("MIB-000001")]
+    out = tmp_path / "predictions.jsonl"
+    prior = b'{"case_id":"MIB-999999","checkpoint":"last-good"}\n'
+    out.write_bytes(prior)
+
+    def fail_replace(_source, _destination):
+        raise OSError(5, "transient output failure")
+
+    monkeypatch.setattr(predict.os, "replace", fail_replace)
+    assert predict._checkpoint_predictions(states, out) is False
+    assert out.read_bytes() == prior
+
+
 def test_input_order_is_size_ascending(tmp_path):
     small = tmp_path / "b_small.pdf"
     big = tmp_path / "a_big.pdf"
