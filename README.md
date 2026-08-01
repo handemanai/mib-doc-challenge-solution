@@ -227,35 +227,45 @@ and the dependency versions are guaranteed to match the scored container:
 ```bash
 docker build -t mib-submission .
 docker run --rm --entrypoint bash -v "$PWD:/src" -w /src mib-submission -c \
-  "apt-get update -qq && apt-get install -y -qq git && pip install -q pytest && \
-   python -m pytest tests/ -q"
-# 1,034 passed, 66 skipped, 0 failed
+  "pip install -q pytest && python -m pytest tests/ -q"
+# 990 passed, 110 skipped, 0 failed
 ```
 
-`git` and `pytest` are installed here only because the suite needs them; neither
-is in the runtime image, and this command needs network access while the scored
-run does not. The 66 skips are the data-backed tests — mount the challenge
-checkout and set `MIB_CHALLENGE_DIR` to run them too, which gives
-**1,049 passed, 51 skipped, 0 failed** (1,100 collected).
+`pytest` is not in the runtime image, so this command needs network access while
+the scored run does not. Everything that cannot run in a bare container skips
+rather than fails: 44 provenance tests need `git` (absent from
+`python:3.11-slim`) and the rest are data-backed. Add `git` and a challenge
+checkout to run them all:
+
+```bash
+docker run --rm --entrypoint bash \
+  -v "$PWD:/src" -v /path/to/mib-doc-challenge:/challenge -w /src \
+  -e MIB_CHALLENGE_DIR=/challenge mib-submission -c \
+  "apt-get update -qq && apt-get install -y -qq git && pip install -q pytest && \
+   python -m pytest tests/ -q"
+# 1,100 collected: 1,049 passed, 51 skipped, 0 failed
+```
 
 The suite covers golden tests for every mined policy rule, the EV decision
 table, vocab snapping and parser guards, span classification, the calibrator
 round-trip, injected-hang recovery, the governor ladder, and the full red-team
 corpus.
 
-**Running it locally instead?** Use the `Dockerfile`'s pinned set —
-`rapidocr-onnxruntime==1.4.4`, `onnxruntime==1.20.1`, `pymupdf==1.28.0`,
-`numpy==2.2.6`, `opencv-python==4.11.0.86`, `rapidfuzz==3.14.5` — on
-**Python 3.11–3.13**. Two environment traps, neither of them a code problem:
+**Running it locally instead?** Install the pinned set on **Python 3.11–3.13**:
 
-- `onnxruntime==1.20.1` publishes no wheel for Python 3.14, so the pinned set
-  cannot be installed there at all.
-- On an *unpinned* interpreter, roughly a dozen OCR-path tests fail during
-  engine construction, before any assertion runs: newer `rapidocr-onnxruntime`
-  releases changed the `RapidOCR(...)` detector-parameter API.
-- The provenance tests (`test_native_artifact_binding.py`,
-  `test_native_selector_census.py`) shell out to `git`, which is why the
-  container recipe above installs it.
+```bash
+python3.11 -m venv .venv && .venv/bin/pip install -r requirements.txt pytest
+.venv/bin/python -m pytest tests/ -q
+```
+
+`requirements.txt` mirrors the `Dockerfile`'s pins exactly, and the pins are
+load-bearing rather than incidental — RapidOCR's preprocessing and the
+recognizer's numerics are part of the measured result, so floating them changes
+OCR output and invalidates the reported scores. Do not install unpinned:
+`rapidocr-onnxruntime` after 1.4.4 changed the `RapidOCR(...)`
+detector-parameter API, so about a dozen OCR-path tests fail during engine
+construction before any assertion runs. Python 3.14 cannot be used at all —
+`onnxruntime==1.20.1` publishes no wheel for it.
 
 `tools/build_review_kit.py` rebuilds the evidence-aware HTML review kit from a
 specific truth/prediction/ledger/state bundle. It refuses to overwrite an

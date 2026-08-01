@@ -79,7 +79,9 @@ APPROVED → NEEDS_REVIEW with every extracted field unchanged); the other
 anti-oracle guard enablement, the batch-deadline governor (inert on
 hardware inside the batch budget: the full-training-set gate at this
 commit reproduces the certified 128.916 byte-identically with zero
-governor engagements), and documentation. Commits after `fd6bbf6` touch
-documentation only, verifiable with
-`git diff fd6bbf6..HEAD -- mib scripts models tests tools Dockerfile run.sh`
-(empty output), so a rebuild at any later commit reproduces the same rows.
+governor engagements), and documentation. Nothing in the runtime has changed
+since: `git diff fd6bbf6..HEAD -- mib scripts models tools Dockerfile run.sh`
+is empty, so a rebuild at any later commit reproduces the same rows. The only
+non-documentation change after `fd6bbf6` is 14 added lines under `tests/`,
+where two provenance suites now skip instead of erroring when `git` is absent
+(`git diff fd6bbf6..HEAD -- tests`); tests do not run at inference time.

@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import types
@@ -745,6 +746,12 @@ def test_evidence_rejects_malformed_baseline_batch_context(context):
 
 
 def _producer(tmp_path):
+    # The tool under test binds a clean producer *commit*, so exercising it
+    # needs a real repository. git is not part of the runtime (nothing under
+    # mib/ shells out to it) and the scoring image does not ship it, so skip
+    # rather than fail where it is absent.
+    if shutil.which("git") is None:
+        pytest.skip("git is required to build the producer-repo fixture")
     repo = tmp_path / "producer"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)

@@ -1,6 +1,7 @@
 """Static selector census tests; no OCR or recognizer session is used."""
 import io
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -35,6 +36,12 @@ def _eligible_pdf(path):
 
 
 def _bound_census_args(inputs, split="dev"):
+    # The census binds a clean producer *commit*, so exercising it needs a real
+    # repository. git is not part of the runtime (nothing under mib/ shells out
+    # to it) and the scoring image does not ship it, so skip rather than fail
+    # where it is absent.
+    if shutil.which("git") is None:
+        pytest.skip("git is required to build the producer-repo fixture")
     config = dict(EFFECTIVE_CONFIG_DEFAULTS, MIB_NATIVE_SCAN_OCR="1")
     entries = []
     for ordinal, path in enumerate(sorted(inputs.glob("*.pdf"))):
