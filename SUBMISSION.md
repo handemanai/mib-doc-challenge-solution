@@ -24,11 +24,13 @@ failure modes, and what another week buys).
   and whose trie-constrained decoder cannot emit values outside the legal field
   vocabularies. Nothing in the runtime follows instructions, so the injection
   surface the dataset targets does not exist in this system.
-- Measured under those exact flags via the organizers' own
-  `scripts/run_docker_submission.py`: **0.27 GiB image** (4 GiB cap), **12 MB of
-  model artifacts** (1 GiB total / 250 MiB per-artifact caps), **2.88 GiB peak
-  RSS** (8 GiB cap), **3.41s/PDF** (6s budget) projecting to **4.7h** against the
-  8h20m limit. Slowest packet in the corpus: 62.7s against the 120s per-case
+- Measured under those exact flags, and re-verified at the submission commit on
+  the image built from a clean clone of the public repository: **0.27 GiB
+  image** (4 GiB cap), **12 MB of model artifacts** (1 GiB total / 250 MiB
+  per-artifact caps), **3.3 GiB peak RSS** (8 GiB cap), **3.43s/PDF** (6s
+  budget) projecting to **~17,100s (4.8h)** against the 30,000s limit — both
+  time margins 1.75×. The four workers saturate the 4-vCPU quota (measured
+  400% CPU). Slowest packet in the corpus: 62.7s against the 120s per-case
   deadline.
 - Deterministic seeds; two clean-checkout runs produce byte-identical output.
 - Per-case deadlines, a parent heartbeat watchdog, and planned worker recycling
