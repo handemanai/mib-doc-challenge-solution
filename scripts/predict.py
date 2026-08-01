@@ -55,6 +55,130 @@ RETRY_BUDGET_SECS = float(os.environ.get("MIB_RETRY_BUDGET_SECS", "1100"))
 RETRY_KILL_GRACE_SECS = float(os.environ.get("MIB_RETRY_KILL_GRACE_SECS", "5"))
 BATCH_LIMIT_SECS = float(os.environ.get("MIB_BATCH_LIMIT_SECS", "30000"))
 FINALIZE_RESERVE_SECS = float(os.environ.get("MIB_FINALIZE_RESERVE_SECS", "60"))
+
+# --- Batch-deadline governor -------------------------------------------------
+# The per-case SIGALRM (layer 1) and the heartbeat watchdog (layer 2) protect
+# the batch from one pathological case. The governor is layer 3: it protects
+# the batch from slow evaluation hardware, where every case is fine but the
+# sum breaches the batch time limit and the container is hard-killed with the
+# run unrecoverable. The supervisor projects the finish time from observed
+# completion pace (recent-window; the input list is size-sorted so early pace
+# is not representative of the whole batch) and publishes a degradation level
+# that workers read per case (scripts/run_shard.py GOVERNOR_LEVELS). Levels
+# shed the least valuable OCR work first — native-scan page budgets, then the
+# native second view, then per-case time ceilings — and recover when the
+# projection does. On hardware inside the budget the projection never crosses
+# level 1 and output is byte-identical to an ungoverned run. Thresholds were
+# tuned in replay against the full 5,000-case timing profile: inert through
+# ~1.3x hardware slowdown, finishes inside the batch limit through ~3x.
+GOVERNOR_LEVEL_FILE = "governor_level"          # must match run_shard.py
+GOVERNOR_WARMUP_MIN = 100
+GOVERNOR_WARMUP_DIVISOR = 20                    # engage after N/20 completions
+GOVERNOR_WINDOW = 200                           # recent-pace window, completions
+GOVERNOR_TARGET_FRACTION = 0.9
+GOVERNOR_TARGET_FLOOR_FRACTION = 0.7            # small-batch reserve floor
+GOVERNOR_SECS_PER_PDF = 6.0                     # the challenge's per-PDF budget
+GOVERNOR_UP = ((1.70, 4), (1.35, 3), (1.12, 2), (1.00, 1))
+GOVERNOR_DOWN = {1: 0.95, 2: 1.06, 3: 1.28, 4: 1.60}
+
+
+class _Governor:
+    """Project the batch finish continuously; publish a degradation level."""
+
+    def __init__(self, tmp, total_cases, batch_started, enabled):
+        self.path = Path(tmp) / GOVERNOR_LEVEL_FILE
+        self.total = total_cases
+        self.started = batch_started
+        self.enabled = enabled and total_cases > 0
+        self.level = 0
+        # Warmup scales with the batch but is capped at a tenth of it: a
+        # 100-case floor on a small batch would burn most of the budget
+        # before the governor could act (measured: a 200-case batch at 2x
+        # throttle engaged at 75% budget spent and still overran).
+        self.warmup = min(max(GOVERNOR_WARMUP_MIN,
+                              total_cases // GOVERNOR_WARMUP_DIVISOR),
+                          max(20, total_cases // 10))
+        budget = min(BATCH_LIMIT_SECS, total_cases * GOVERNOR_SECS_PER_PDF)
+        # The retry/finalize reserves are fixed costs; on small batches they
+        # would swallow the whole budget and drive the target toward zero, so
+        # the target never drops below a fixed fraction of the budget.
+        self.target = max(budget * GOVERNOR_TARGET_FLOOR_FRACTION,
+                          budget * GOVERNOR_TARGET_FRACTION
+                          - RETRY_BUDGET_SECS - FINALIZE_RESERVE_SECS)
+        self.samples = []                       # (monotonic, completed) ticks
+
+    def update(self, completed, now=None):
+        if not self.enabled or completed <= 0:
+            return self.level
+        completed = min(completed, self.total)
+        now = time.monotonic() if now is None else now
+        if not self.samples or completed > self.samples[-1][1]:
+            self.samples.append((now, completed))
+            if len(self.samples) > 4 * GOVERNOR_WINDOW:
+                del self.samples[:2 * GOVERNOR_WINDOW]
+        if completed < self.warmup or completed >= self.total:
+            return self.level
+        base_t, base_n = self.samples[0]
+        for tick_t, tick_n in reversed(self.samples):
+            base_t, base_n = tick_t, tick_n
+            if completed - tick_n >= GOVERNOR_WINDOW:
+                break
+        elapsed = now - self.started
+        span_cases = completed - base_n
+        span_secs = now - base_t
+        pace = (span_secs / span_cases if span_cases > 0 and span_secs > 0
+                else elapsed / completed)
+        projected = elapsed + pace * (self.total - completed)
+        ratio = projected / self.target
+        new_level = 0
+        for threshold, candidate in GOVERNOR_UP:
+            if ratio > threshold:
+                new_level = candidate
+                break
+        if new_level < self.level and ratio > GOVERNOR_DOWN.get(self.level, 0.0):
+            new_level = self.level              # hysteresis: hold the level
+        if new_level != self.level:
+            self.level = new_level
+            self._publish()
+            print(f"[governor] level {new_level} at {completed}/{self.total} "
+                  f"(elapsed {elapsed:.0f}s projected {projected:.0f}s "
+                  f"target {self.target:.0f}s)", flush=True)
+        return self.level
+
+    def _publish(self):
+        staging = self.path.with_name(self.path.name + ".tmp")
+        staging.write_text(str(self.level))
+        os.replace(staging, self.path)
+
+
+class _CompletionCounter:
+    """Incremental newline count over the workers' append-only state files."""
+
+    def __init__(self, shards):
+        self.shards = shards
+        self.offsets = {}
+        self.count = 0
+
+    def poll(self):
+        for shard in self.shards:
+            for path in shard.state_files:
+                key = str(path)
+                offset = self.offsets.get(key, 0)
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    continue
+                if size <= offset:
+                    continue
+                try:
+                    with open(path, "rb") as handle:
+                        handle.seek(offset)
+                        chunk = handle.read(size - offset)
+                except OSError:
+                    continue
+                self.count += chunk.count(b"\n")
+                self.offsets[key] = offset + len(chunk)
+        return self.count
 RUN_IDENTITY_SCHEMA = "mib-run-identity-v1"
 RUN_RECEIPT_SCHEMA = "mib-run-receipt-v2"
 RUN_IDENTITY_KEYS = {
@@ -228,6 +352,8 @@ def _effective_run_config():
         "MIB_NATIVE_SCAN_FAST_DPI": "150",
         "MIB_PIXMATCH": "1",
         "MIB_TRANSDUCER": "0",
+        "MIB_ANTI_ORACLE_GUARD": "0",
+        "MIB_GOVERNOR": "1",
         "MIB_REC_MODEL": "",
         "MIB_PIX_BANK": "",
         "MIB_DUMP_RAW": "0",
@@ -250,7 +376,8 @@ def _effective_run_config():
     }
     for key in os.environ:
         if key.startswith("MIB_TEST_") or key in {
-                "MIB_ACTIVE_CASE", "MIB_EXTRACTION_ATTEMPT"}:
+                "MIB_ACTIVE_CASE", "MIB_EXTRACTION_ATTEMPT",
+                "MIB_GOVERNOR_FORCE_LEVEL"}:
             raise SystemExit(
                 f"test/injection environment cannot produce a run receipt: {key}")
         if key.startswith("MIB_") and key not in defaults and key != "MIB_LEDGER":
@@ -648,7 +775,10 @@ def _retry_failed_states(states, pdfs, tmp, batch_started):
             hb_file = tmp / f"retry_{ordinal}.hb"
             list_file.write_text(pdf + "\n")
             env = dict(os.environ, OMP_NUM_THREADS="1",
-                       MIB_EXTRACTION_ATTEMPT="2")
+                       MIB_EXTRACTION_ATTEMPT="2",
+                       # Retries are few and budget-clamped; they always run
+                       # at full quality regardless of the governor level.
+                       MIB_GOVERNOR_FORCE_LEVEL="0")
             remaining = retry_deadline - time.monotonic()
             timeout = max(0.1, min(RETRY_CASE_TIMEOUT, remaining))
             command = [sys.executable,
@@ -800,10 +930,14 @@ def main():
         print(f"[flush] initial flush failed, will retry: {exc!r}",
               file=sys.stderr, flush=True)
     last_flush = time.time()
+    governor = _Governor(tmp, len(pdfs), batch_started,
+                         enabled=os.environ.get("MIB_GOVERNOR", "1") == "1")
+    counter = _CompletionCounter(shards)
     while not all(s.finished for s in shards):
         time.sleep(POLL_SECS)
         for s in shards:
             s.tick()
+        governor.update(counter.poll())
         if time.time() - last_flush >= FLUSH_SECS:
             interim = _collect_states(shards, pdfs, complete=True)
             _write_predictions(interim, batch_epoch(interim), out,

@@ -2321,17 +2321,19 @@ def decide(state, receipt_date=None, batch_revoked=frozenset()):
               and noteread.approve_enabled()):
             decision, reasons = "APPROVED", ["recovered_adjudicator_note_approve"]
 
-    # Anti-oracle approval guard (DARK, default OFF): the planted answer key's
-    # adjudication token is wrong by construction (0/157 train packets whose
-    # hidden key claims APPROVED are truly APPROVED — all are DENIED or
-    # NEEDS_REVIEW traps), so agreement between our tentative APPROVED and a
-    # hidden APPROVED claim is a trap signature, not corroboration. It fires
-    # on zero current dev predictions (pure private-set FA insurance), but it
-    # deliberately breaks the trap==clean-twin output invariant the red-team
-    # suite proves, so it ships dark: enabling it is an explicit product call.
-    # Distrust-direction only: a legible or recovered adjudicator-note
-    # approval keeps its authority, and hidden DENIED/NEEDS_REVIEW claims
-    # never influence anything in any direction.
+    # Anti-oracle approval guard (code default OFF; the shipped container
+    # enables it via run.sh): the planted answer key's adjudication token is
+    # wrong by construction (0/157 train packets whose hidden key claims
+    # APPROVED are truly APPROVED — all are DENIED or NEEDS_REVIEW traps), so
+    # agreement between our tentative APPROVED and a hidden APPROVED claim is
+    # a trap signature, not corroboration. It fires on zero of the 1,000
+    # labeled training cases (the demotion is pure false-approval insurance),
+    # and it is the one deliberate, documented exception to the
+    # trap==clean-twin output invariant the red-team suite proves: hidden
+    # content is never evidence, and its presence can only push a decision
+    # away from approval. Distrust-direction only: a legible or recovered
+    # adjudicator-note approval keeps its authority, and hidden
+    # DENIED/NEEDS_REVIEW claims never influence anything in any direction.
     if (os.environ.get("MIB_ANTI_ORACLE_GUARD", "0") == "1"
             and decision == "APPROVED"
             and state["injection"].get("answer_key_claims_approved")

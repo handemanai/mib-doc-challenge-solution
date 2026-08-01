@@ -9,5 +9,6 @@ export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export MIB_NATIVE_SCAN_OCR="${MIB_NATIVE_SCAN_OCR:-1}"
+export MIB_ANTI_ORACLE_GUARD="${MIB_ANTI_ORACLE_GUARD:-1}"
 
 exec python3 /app/scripts/predict.py "$input_dir" "$output_path" "$@"

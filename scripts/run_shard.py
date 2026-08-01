@@ -24,6 +24,59 @@ EXTRACTION_ATTEMPT = int(os.environ.get("MIB_EXTRACTION_ATTEMPT", "1"))
 MAX_CASES_PER_WORKER = int(os.environ.get("MIB_WORKER_MAX_CASES", "48"))
 RECYCLE_EXIT_CODE = 75
 
+# --- Batch-deadline governor (hang protection layer 3) -----------------------
+# predict.py projects the batch finish time and publishes a degradation level
+# to a file beside the state files; each case reads the level as it starts.
+# Levels shed the least valuable OCR work first, only for cases not yet
+# started, and recover automatically when the projection improves. Level 0 is
+# byte-identical to an ungoverned run, so on hardware that meets the batch
+# budget the governor never changes an output. The ladder exists so that slow
+# evaluation hardware produces a measured, bounded quality cost on the tail
+# instead of a batch-limit kill that loses the run.
+# MIB_GOVERNOR_FORCE_LEVEL is an internal seam (the retry pass pins level 0;
+# pinned-level measurement runs use it); receipt-producing supervisors reject
+# it from the environment, so official runs cannot be quietly pinned.
+GOVERNOR_LEVEL_FILE = "governor_level"
+GOVERNOR_LEVELS = {
+    0: {},
+    1: {"MIB_NATIVE_MAX_PAGES": "2", "MIB_NATIVE_MAX_HQ": "1"},
+    2: {"MIB_NATIVE_SCAN_OCR": "0"},
+    3: {"MIB_NATIVE_SCAN_OCR": "0"},
+    4: {"MIB_NATIVE_SCAN_OCR": "0"},
+}
+GOVERNOR_CASE_TIMEOUT = {3: 60, 4: 20}
+GOVERNOR_MAX_LEVEL = max(GOVERNOR_LEVELS)
+_GOVERNED_KEYS = ("MIB_NATIVE_SCAN_OCR", "MIB_NATIVE_MAX_PAGES",
+                  "MIB_NATIVE_MAX_HQ")
+_BASELINE_ENV = {key: os.environ.get(key) for key in _GOVERNED_KEYS}
+
+
+def _governor_level(state_out):
+    forced = os.environ.get("MIB_GOVERNOR_FORCE_LEVEL")
+    raw = forced
+    if raw is None:
+        try:
+            raw = (Path(state_out).parent / GOVERNOR_LEVEL_FILE).read_text()
+        except OSError:
+            return 0
+    try:
+        return max(0, min(GOVERNOR_MAX_LEVEL, int(raw.strip())))
+    except ValueError:
+        return 0
+
+
+def _apply_governor_env(level):
+    """Stateless per-case application: overrides for the level, the operator's
+    original values for everything else, so a recovered level leaves no
+    residue."""
+    overrides = GOVERNOR_LEVELS.get(level, {})
+    for key in _GOVERNED_KEYS:
+        value = overrides.get(key, _BASELINE_ENV[key])
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
 
 class CaseTimeout(BaseException):
     """Deadline control flow; broad best-effort observers must not swallow it."""
@@ -104,7 +157,9 @@ def main(list_file, state_out, heartbeat=None):
         for i, pdf in enumerate(pdfs):
             if hb:
                 hb.write_text(pdf)
-            signal.alarm(CASE_TIMEOUT)
+            level = _governor_level(state_out)
+            _apply_governor_env(level)
+            signal.alarm(GOVERNOR_CASE_TIMEOUT.get(level, CASE_TIMEOUT))
             os.environ["MIB_ACTIVE_CASE"] = Path(pdf).stem
             case_started = time.monotonic()
             try:
@@ -134,6 +189,8 @@ def main(list_file, state_out, heartbeat=None):
             finally:
                 signal.alarm(0)
                 os.environ.pop("MIB_ACTIVE_CASE", None)
+            if level:
+                state["governor_level"] = level
             timing_log = os.environ.get("MIB_TIMING_LOG")
             if timing_log:
                 # Opt-in per-case wall-time telemetry (off by default; no
