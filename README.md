@@ -221,24 +221,41 @@ tests resolve the training PDFs and labels through it.
 
 ## Testing
 
+**Recommended — run inside the image you already built.** No local Python setup,
+and the dependency versions are guaranteed to match the scored container:
+
 ```bash
-pip install pytest && python -m pytest tests/ -q
-# 1,049 passed, 51 skipped, 0 failed (1,100 collected)
+docker build -t mib-submission .
+docker run --rm --entrypoint bash -v "$PWD:/src" -w /src mib-submission -c \
+  "apt-get update -qq && apt-get install -y -qq git && pip install -q pytest && \
+   python -m pytest tests/ -q"
+# 1,034 passed, 66 skipped, 0 failed
 ```
 
-The suite runs from a clean checkout without a build step: golden tests for
-every mined policy rule, the EV decision table, vocab snapping and parser
-guards, span classification, the calibrator round-trip, injected-hang recovery,
-and the full red-team corpus.
+`git` and `pytest` are installed here only because the suite needs them; neither
+is in the runtime image, and this command needs network access while the scored
+run does not. The 66 skips are the data-backed tests — mount the challenge
+checkout and set `MIB_CHALLENGE_DIR` to run them too, which gives
+**1,049 passed, 51 skipped, 0 failed** (1,100 collected).
 
-**Run it against the pinned runtime versions** (the `Dockerfile` set: Python
-3.11, `rapidocr-onnxruntime==1.4.4`, `onnxruntime==1.20.1`, `pymupdf==1.28.0`,
-`numpy==2.2.6`, `opencv-python==4.11.0.86`, `rapidfuzz==3.14.5`). Roughly a
-dozen OCR-path tests fail on an unpinned interpreter for environment reasons
-alone — newer `rapidocr-onnxruntime` releases changed the `RapidOCR(...)`
-detector-parameter API, so engine construction raises before any assertion
-runs. Those failures are not regressions; the pinned set is what the scored
-container builds and what the reported result above reflects.
+The suite covers golden tests for every mined policy rule, the EV decision
+table, vocab snapping and parser guards, span classification, the calibrator
+round-trip, injected-hang recovery, the governor ladder, and the full red-team
+corpus.
+
+**Running it locally instead?** Use the `Dockerfile`'s pinned set —
+`rapidocr-onnxruntime==1.4.4`, `onnxruntime==1.20.1`, `pymupdf==1.28.0`,
+`numpy==2.2.6`, `opencv-python==4.11.0.86`, `rapidfuzz==3.14.5` — on
+**Python 3.11–3.13**. Two environment traps, neither of them a code problem:
+
+- `onnxruntime==1.20.1` publishes no wheel for Python 3.14, so the pinned set
+  cannot be installed there at all.
+- On an *unpinned* interpreter, roughly a dozen OCR-path tests fail during
+  engine construction, before any assertion runs: newer `rapidocr-onnxruntime`
+  releases changed the `RapidOCR(...)` detector-parameter API.
+- The provenance tests (`test_native_artifact_binding.py`,
+  `test_native_selector_census.py`) shell out to `git`, which is why the
+  container recipe above installs it.
 
 `tools/build_review_kit.py` rebuilds the evidence-aware HTML review kit from a
 specific truth/prediction/ledger/state bundle. It refuses to overwrite an
@@ -264,6 +281,12 @@ repository at the submission commit:
 | Model artifacts ≤ 1 GiB total, ≤ 250 MiB each | 12 MB total, 7.9 MB largest | 85× / 32× |
 | Memory 8 GiB | 3.3 GiB peak RSS | 2.4× |
 | Predictions ≤ 25 MiB | 1.6 MB | 15× |
+
+Verified on both architectures: the `Dockerfile` builds clean for
+**linux/amd64** as well as linux/arm64 (0.295 GiB and 0.267 GiB respectively —
+every pinned wheel resolves on both), and packets processed by the amd64 image
+produce rows **byte-identical** to the arm64-produced submitted rows. The
+timings below are arm64.
 
 The per-PDF figure is wall-clock across the whole batch at 4 workers, which
 saturate the 4-vCPU quota (measured 400% CPU). The production 5,000-packet
