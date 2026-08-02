@@ -40,6 +40,24 @@ CASE_RE = re.compile(r"MIB-\d{6}")
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
+def semantically_negates(raw, canonical=None):
+    """Whether OCR text explicitly negates a would-be canonical value."""
+    parts = re.findall(r"[A-Za-z0-9]+", str(raw).lower())
+    if not parts:
+        return False
+    if parts[0] in {"no", "not", "never"}:
+        return True
+    if canonical:
+        raw_compact = "".join(parts)
+        canonical_compact = "".join(re.findall(
+            r"[A-Za-z0-9]+", str(canonical).lower()))
+        return raw_compact in {
+            prefix + canonical_compact
+            for prefix in ("no", "not", "never", "un", "non", "dis")
+        }
+    return False
+
+
 # OCR-confusion edit costs mined from synthetic renders of known vocab values
 # passed through the real OCR engine under the corpus damage transforms — no
 # labeled dev data involved. Costs are coarse tiers (0.2 common / 0.45 seen /

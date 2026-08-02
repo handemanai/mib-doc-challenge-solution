@@ -11,14 +11,16 @@ OCR of the page rasters is layered on top for image-only fields.
 import re
 
 from .vocab import (CASE_RE, DATE_RE, FEES, FLAGS, PURPOSES, SPECIES, SPONSOR_RE,
-                    VISAS, WORLDS, snap)
+                    VISAS, WORLDS, semantically_negates, snap)
 
 LABEL_PATTERNS = {
     "applicant_name": re.compile(r"Applicant(?: name)?:\s*([A-Z][a-z]+ [A-Z][a-z]+)"),
     "species_code": re.compile(r"Species(?: Match| code)?:\s*([A-Z_ ]{4,})"),
     "risk_flags": re.compile(r"(?:Observed|Risk) flags?:\s*([a-z_|]+|none)"),
     "home_world": re.compile(r"Home ?world:\s*(\S[^\n]*)"),
-    "visa_class": re.compile(r"Visa(?: class)?:\s*([A-Z]{2,8}-?\d?)"),
+    "visa_class": re.compile(
+        r"Visa(?: class)?:\s*"
+        r"([A-Za-z0-9]+(?:\s*[-_|]\s*[A-Za-z0-9]+)*)"),
     "arrival_date": re.compile(r"Arrival(?: date)?:\s*(\d{4}-\d{2}-\d{2})"),
     "fee_status": re.compile(r"Fee(?: status)?:\s*([a-z]+)"),
     "declared_purpose": re.compile(r"Purpose:\s*([a-z ]+)"),
@@ -64,13 +66,15 @@ def page_is_foreign(case_id, text):
         not _case_id_matches(case_id, observed_id) for observed_id in ids)
 
 
-def extract_from_visible_text(case_id, page_texts):
-    """page_texts: list of visible-span text per page. Returns {field: (value, source)}."""
+def extract_from_visible_text(case_id, page_texts, *, include_raw=False):
+    """Extract trusted visible labels, optionally retaining the raw spelling."""
     out = {}
 
-    def put(field, value, source):
+    def put(field, value, source, raw=None):
         if field not in out and value:
-            out[field] = (value.strip(), source)
+            record = (value.strip(), source)
+            out[field] = (*record, str(raw if raw is not None else value).strip()) \
+                if include_raw else record
 
     for text in page_texts:
         if page_is_foreign(case_id, text):
@@ -80,24 +84,27 @@ def extract_from_visible_text(case_id, page_texts):
         if is_letter:
             m = LETTER_SPONSOR_RE.search(text)
             if m:
-                put("sponsor_id", m.group(1), "sponsor_letter")
+                put("sponsor_id", m.group(1), "sponsor_letter", m.group(1))
             m = LETTER_NAME_RE.search(text)
             if m:
-                put("applicant_name", re.sub(r"\s+", " ", m.group(1)), "sponsor_letter")
+                put("applicant_name", re.sub(r"\s+", " ", m.group(1)),
+                    "sponsor_letter", m.group(1))
             m = LETTER_PURPOSE_RE.search(text)
             if m:
-                purpose, _, _ = snap(re.sub(r"\s+", " ", m.group(1)).strip(), PURPOSES)
-                put("declared_purpose", purpose, "sponsor_letter")
+                raw = re.sub(r"\s+", " ", m.group(1)).strip()
+                purpose, _, _ = snap(raw, PURPOSES)
+                put("declared_purpose", purpose, "sponsor_letter", raw)
             m = LETTER_VISA_RE.search(text)
             if m:
                 visa, _, _ = snap(m.group(1), VISAS)
-                put("visa_class", visa, "sponsor_letter")
+                put("visa_class", visa, "sponsor_letter", m.group(1))
 
         for field, pattern in LABEL_PATTERNS.items():
             m = pattern.search(text)
             if not m:
                 continue
-            value = m.group(1).strip()
+            raw_value = m.group(1).strip()
+            value = raw_value
             source = "letter_label" if is_letter else "slip_label"
             if field == "species_code":
                 value, _, _ = snap(value, SPECIES)
@@ -112,5 +119,7 @@ def extract_from_visible_text(case_id, page_texts):
             elif field == "risk_flags":
                 parts = [snap(p, FLAGS)[0] for p in value.split("|") if p and p != "none"]
                 value = "|".join(sorted(p for p in parts if p)) or "none"
-            put(field, value, source)
+            if semantically_negates(raw_value, value):
+                value = None
+            put(field, value, source, raw_value)
     return out

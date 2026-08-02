@@ -427,6 +427,10 @@ def _rank1_note_view(parsed, lines, case_id, origin=None):
             field: list(values)
             for field, values in notes.get("rank1_observations", {}).items()
         },
+        "_rank1_aliases": [
+            dict(record) for record in notes.get("_rank1_aliases", [])
+            if isinstance(record, dict)
+        ],
         "harvested": {},
         "registry_embargo": False,
         "_rank1_origin": dict(origin or {}),
@@ -448,6 +452,7 @@ def _without_rank1_authority(parsed):
     safe_notes["signed_fields"] = {}
     safe_notes["_rank1_extra_values"] = {}
     safe_notes["rank1_observations"] = {}
+    safe_notes["_rank1_aliases"] = []
     if ptype == "adjudicator_note":
         # The composited baseline below owns signed note fields. A native note
         # can contribute only through the exact-bound alternate path.
@@ -464,6 +469,10 @@ def _tag_rank1_view(parsed, origin):
         field: list(values)
         for field, values in notes.get("rank1_observations", {}).items()
     }
+    tagged["_rank1_aliases"] = [
+        dict(record) for record in notes.get("_rank1_aliases", [])
+        if isinstance(record, dict)
+    ]
     # Bare-value harvesting is ordinary low-rank OCR evidence. It must never
     # acquire adjudicator authority merely because it appeared on a note page.
     tagged["harvested"] = {}
@@ -581,6 +590,34 @@ def _composited_rank1_attestation(views):
         "evidence": {field: records
                      for field, records in sorted(evidence.items())},
     }
+
+
+def _rank1_strike_alias_attestation(views):
+    """Return state-only raw/canonical provenance for signed OCR aliases.
+
+    The public composited payload has a strict binder schema, so raw parser
+    provenance travels beside it in extraction state and is consumed only by
+    ``decide``.  Each record remains field- and origin-bound; no crossed token
+    is ever fuzzy-snapped at decision time.
+    """
+    records = []
+    for view in views:
+        if not view:
+            continue
+        notes = view[2] if len(view) > 2 and isinstance(view[2], dict) else {}
+        origin = notes.get("_rank1_origin", {})
+        if not isinstance(origin, dict):
+            continue
+        for alias in notes.get("_rank1_aliases", []):
+            if (not isinstance(alias, dict)
+                    or set(alias) != {"field", "raw", "value"}
+                    or not all(isinstance(alias.get(key), str)
+                               and alias.get(key) for key in alias)):
+                continue
+            record = {**alias, "origin": dict(origin)}
+            if record not in records:
+                records.append(record)
+    return records
 
 
 def _rank1_policy_conflict(values):
@@ -983,11 +1020,158 @@ def _value_is_struck(value, struck_values):
     struck = {str(value).lower() for value in struck_values}
     normalized = str(value).lower()
     return normalized in struck or any(
-        word.strip(".,:;") in struck
-        for word in re.split(r"[|\s]+", normalized))
+        token in struck for token in forensics._strike_tokens(normalized))
 
 
-def _strike_approval_block_fields(struck_values, pools, batch_revoked):
+def _candidate_is_rank1(candidate):
+    """Whether a pooled candidate came from adjudicator authority."""
+    return (isinstance(candidate, (list, tuple)) and len(candidate) >= 3
+            and (candidate[2] == 1
+                 or str(candidate[1]) in {
+                     "adjudicator_note", "manual_correction"}))
+
+
+def _candidate_is_struck(candidate, struck_values):
+    """Match a candidate against both its canonical value and parser raw."""
+    if not isinstance(candidate, (list, tuple)) or not candidate:
+        return False
+    if _value_is_struck(candidate[0], struck_values):
+        return True
+    return (len(candidate) >= 5
+            and _value_is_struck(candidate[4], struck_values))
+
+
+def _strike_alias_taints(pools, struck_values, *, rank1_only=False):
+    """Return field-bound canonical values reached from struck parser raw.
+
+    These are not fuzzy guesses: the candidate itself proves that the shipped
+    parser accepted ``raw`` as ``value`` for ``field``.  Keeping the field in
+    the taint prevents a crossed ``pald`` from suppressing unrelated text that
+    happens to resemble ``paid``.
+    """
+    taints = set()
+    struck = set(struck_values or ())
+    if not isinstance(pools, dict) or not struck:
+        return frozenset()
+    for field, candidates in pools.items():
+        if not isinstance(candidates, list):
+            continue
+        for candidate in candidates:
+            if (not isinstance(candidate, (list, tuple))
+                    or len(candidate) < 5 or not candidate[0]
+                    or (rank1_only and not _candidate_is_rank1(candidate))):
+                continue
+            raw = candidate[4]
+            if (_value_is_struck(raw, struck)
+                    and not _value_is_struck(candidate[0], struck)):
+                taints.add((str(field), str(candidate[0]).lower()))
+    return frozenset(taints)
+
+
+def _rank1_alias_taints(records, struck_values):
+    """Resolve exact raw strikes through state-only signed alias provenance."""
+    taints = set()
+    struck = set(struck_values or ())
+    if not isinstance(records, list) or not struck:
+        return frozenset()
+    for record in records:
+        if (not isinstance(record, dict)
+                or not isinstance(record.get("field"), str)
+                or not isinstance(record.get("raw"), str)
+                or not isinstance(record.get("value"), str)):
+            continue
+        if _value_is_struck(record["raw"], struck):
+            taints.add((record["field"], record["value"].lower()))
+    return frozenset(taints)
+
+
+def _struck_token_canonicalizes_to(field, token, value):
+    """Field-bound fallback for canonical-only targeted readers.
+
+    OCR/text parser candidates normally retain their raw spelling. Pixel
+    readers cannot, so compare a strike token only against the legal grammar
+    for that reader's already-known field and emitted canonical value.
+    """
+    if not isinstance(token, str) or not token or not isinstance(value, str):
+        return False
+    if field == "finding":
+        canonical, _, _ = parse_ocr.snap(
+            re.sub(r"[\s-]+", "_", token.upper()),
+            ["APPROVED", "DENIED", "NEEDS_REVIEW"], min_score=70)
+    else:
+        canonical, _ = parse_ocr._snap_value(field, token)
+    return canonical == value
+
+
+def _targeted_source_alias_taints(pools, struck_values):
+    """Cover canonical-only pixmatch/fee ROI output after a raw alias strike."""
+    taints = set()
+    struck = {str(value).lower() for value in struck_values or ()}
+    if not isinstance(pools, dict) or not struck:
+        return frozenset()
+    for field, candidates in pools.items():
+        for candidate in candidates if isinstance(candidates, list) else ():
+            if (not isinstance(candidate, (list, tuple)) or len(candidate) < 2
+                    or str(candidate[1]) not in {"pixmatch", "fee_roi"}
+                    or not isinstance(candidate[0], str)):
+                continue
+            if any(_struck_token_canonicalizes_to(
+                    field, token, candidate[0]) for token in struck):
+                taints.add((str(field), candidate[0].lower()))
+    return frozenset(taints)
+
+
+def _value_is_tainted(field, value, taints):
+    return (str(field), str(value).lower()) in set(taints or ())
+
+
+def _state_strike_taints(state):
+    """Compute conservative typed alias taint for all approval-capable paths."""
+    raw_global = set(state.get("struck_values", []))
+    raw_authority = set(state.get("struck_authority_values", raw_global))
+    pools = state.get("pools", {})
+    aliases = state.get("rank1_strike_aliases", [])
+    return frozenset(
+        set(state.get("_strike_taints", ()))
+        | set(_strike_alias_taints(pools, raw_global))
+        | set(_targeted_source_alias_taints(pools, raw_global))
+        | set(_strike_alias_taints(
+            pools, raw_authority, rank1_only=True))
+        | set(_rank1_alias_taints(aliases, raw_authority)))
+
+
+def _approval_blocking_value(field, value, batch_revoked):
+    """Whether one field value can independently prevent an approval."""
+    normalized = str(value).strip()
+    lowered = normalized.lower()
+    if field == "risk_flags":
+        flags = {flag.lower() for flag in normalized.split("|")} - {
+            "", "none"}
+        return bool(flags & {
+            flag.lower() for flag in DISQUALIFYING_FLAGS | REVIEW_FLAGS})
+    if field == "fee_status":
+        return lowered in {"unpaid", "unknown", "waived"}
+    if field == "visa_class":
+        return lowered == "transit-7"
+    if field == "home_world":
+        return lowered in {
+            world.lower() for world in
+            rules.HARD_EMBARGO_WORLDS | rules.SOFT_EMBARGO_WORLDS}
+    if field == "sponsor_id":
+        return lowered in {
+            sponsor.lower() for sponsor in
+            rules.REVOKED_SPONSORS | set(batch_revoked)}
+    if field == "arrival_date":
+        try:
+            date.fromisoformat(normalized)
+            return True
+        except ValueError:
+            return False
+    return False
+
+
+def _strike_approval_block_fields(struck_values, pools, batch_revoked,
+                                  strike_taints=frozenset()):
     """Fields where cancellation can remove approval-blocking evidence.
 
     The strike detector emits document-global lexical values and some readers
@@ -997,34 +1181,6 @@ def _strike_approval_block_fields(struck_values, pools, batch_revoked):
     """
     struck = {str(value).lower() for value in struck_values}
     affected = set()
-
-    def blocks(field, value):
-        normalized = str(value).strip()
-        lowered = normalized.lower()
-        if field == "risk_flags":
-            flags = {flag.lower() for flag in normalized.split("|")} - {
-                "", "none"}
-            return bool(flags & {
-                flag.lower() for flag in DISQUALIFYING_FLAGS | REVIEW_FLAGS})
-        if field == "fee_status":
-            return lowered in {"unpaid", "unknown", "waived"}
-        if field == "visa_class":
-            return lowered == "transit-7"
-        if field == "home_world":
-            return lowered in {
-                world.lower() for world in
-                rules.HARD_EMBARGO_WORLDS | rules.SOFT_EMBARGO_WORLDS}
-        if field == "sponsor_id":
-            return lowered in {
-                sponsor.lower() for sponsor in
-                rules.REVOKED_SPONSORS | set(batch_revoked)}
-        if field == "arrival_date":
-            try:
-                date.fromisoformat(normalized)
-                return True
-            except ValueError:
-                return False
-        return False
 
     legal_values = {
         "risk_flags": DISQUALIFYING_FLAGS | REVIEW_FLAGS,
@@ -1050,13 +1206,89 @@ def _strike_approval_block_fields(struck_values, pools, batch_revoked):
 
     for field, candidates in pools.items():
         for candidate in candidates:
-            if (candidate and blocks(field, candidate[0])
-                    and _value_is_struck(candidate[0], struck)):
+            if (candidate and _approval_blocking_value(
+                    field, candidate[0], batch_revoked)
+                    and (_candidate_is_struck(candidate, struck)
+                         or _value_is_tainted(
+                             field, candidate[0], strike_taints))):
                 affected.add(field)
     return frozenset(affected)
 
 
-def _sanitize_rank1_strikes(doc_notes, composited_payload, struck_values):
+def _struck_rank1_approval_guards(doc_notes, composited_payload,
+                                  struck_values, batch_revoked,
+                                  strike_taints=frozenset()):
+    """Return adverse signed authority removed by local strike suppression.
+
+    ``struck_authority_values`` is deliberately occurrence-sensitive in the
+    detector but token-global in the serialized state. The caller supplies only
+    ambiguous local tokens (locally struck, but not globally cancelled because
+    another visible occurrence remains unstruck). Record only adverse values
+    that actually existed on a rank-1 surface before the sanitizer removes them,
+    so duplicate-local suppression cannot turn DENIED/REVIEW or an adverse
+    signed correction into an otherwise-clean approval. A value whose every
+    visible occurrence is struck keeps the ordinary unambiguous-cancellation
+    behavior.
+    """
+    struck = set(struck_values or ())
+    notes = doc_notes if isinstance(doc_notes, dict) else {}
+    payload = composited_payload if isinstance(composited_payload, dict) else {}
+    fields = set()
+    adverse_finding = False
+
+    def observe(field, value):
+        nonlocal adverse_finding
+        if (not isinstance(value, str) or not value
+                or (not _value_is_struck(value, struck)
+                    and not _value_is_tainted(
+                        field, value, strike_taints))):
+            return
+        if field == "finding":
+            if value.strip().upper() in {"DENIED", "NEEDS_REVIEW"}:
+                adverse_finding = True
+            return
+        if _approval_blocking_value(field, value, batch_revoked):
+            fields.add(field)
+
+    observe("finding", notes.get("finding"))
+    observe("finding", notes.get("recovered_finding"))
+    corrections = notes.get("corrections", {})
+    if isinstance(corrections, dict):
+        for field, value in corrections.items():
+            observe(field, value)
+
+    values = payload.get("values", {})
+    if isinstance(values, dict):
+        for field, observed in values.items():
+            if isinstance(observed, list):
+                for value in observed:
+                    observe(field, value)
+    return frozenset(fields), adverse_finding
+
+
+def _struck_rank1_pool_approval_guards(
+        pools, struck_values, strike_taints, batch_revoked):
+    """Return adverse rank-1 pool fields removed by a local strike."""
+    affected = set()
+    if not isinstance(pools, dict):
+        return frozenset()
+    for field, candidates in pools.items():
+        if not isinstance(candidates, list):
+            continue
+        for candidate in candidates:
+            if (not _candidate_is_rank1(candidate) or not candidate
+                    or not _approval_blocking_value(
+                        field, candidate[0], batch_revoked)):
+                continue
+            if (_candidate_is_struck(candidate, struck_values)
+                    or _value_is_tainted(
+                        field, candidate[0], strike_taints)):
+                affected.add(field)
+    return frozenset(affected)
+
+
+def _sanitize_rank1_strikes(doc_notes, composited_payload, struck_values,
+                            strike_taints=frozenset()):
     """Remove crossed-out values from every approval-capable note channel.
 
     Pool filtering alone is insufficient because signed note fields are applied
@@ -1069,16 +1301,25 @@ def _sanitize_rank1_strikes(doc_notes, composited_payload, struck_values):
     raw_corrections = notes.get("corrections", {})
     notes["corrections"] = {
         field: value for field, value in raw_corrections.items()
-        if not _value_is_struck(value, struck)
+        if not (_value_is_struck(value, struck)
+                or _value_is_tainted(field, value, strike_taints))
     } if isinstance(raw_corrections, dict) else {}
 
-    if _value_is_struck(notes.get("finding", ""), struck):
+    if (_value_is_struck(notes.get("finding", ""), struck)
+            or _value_is_tainted(
+                "finding", notes.get("finding", ""), strike_taints)):
         notes.pop("finding", None)
         notes.pop("finding_rank", None)
         notes.pop("finding_authority_origin", None)
-    if _value_is_struck(notes.get("recovered_finding", ""), struck):
+    if (_value_is_struck(notes.get("recovered_finding", ""), struck)
+            or _value_is_tainted(
+                "finding", notes.get("recovered_finding", ""),
+                strike_taints)):
         notes.pop("recovered_finding", None)
-    if _value_is_struck(notes.get("name_correction", ""), struck):
+    if (_value_is_struck(notes.get("name_correction", ""), struck)
+            or _value_is_tainted(
+                "applicant_name", notes.get("name_correction", ""),
+                strike_taints)):
         notes.pop("name_correction", None)
     if _value_is_struck(notes.get("waiver_code", ""), struck):
         notes.pop("waiver_code", None)
@@ -1086,27 +1327,51 @@ def _sanitize_rank1_strikes(doc_notes, composited_payload, struck_values):
     payload = (dict(composited_payload)
                if isinstance(composited_payload, dict) else {})
     raw_values = payload.get("values", {})
-    values = {}
+    kept_values = {}
     if isinstance(raw_values, dict):
         for field, observed in raw_values.items():
             if not isinstance(observed, list):
                 continue
             kept = [value for value in observed
                     if isinstance(value, str) and value
-                    and not _value_is_struck(value, struck)]
+                    and not _value_is_struck(value, struck)
+                    and not _value_is_tainted(
+                        field, value, strike_taints)]
             if kept:
-                values[field] = kept
-    payload["values"] = values
+                kept_values[field] = kept
     raw_evidence = payload.get("evidence", {})
+    evidence = {}
+    values = {}
+    integrity_error = (not isinstance(raw_values, dict)
+                       or not isinstance(raw_evidence, dict))
     if isinstance(raw_evidence, dict):
-        payload["evidence"] = {
-            field: [record for record in records
-                    if isinstance(record, dict)
-                    and not _value_is_struck(record.get("value", ""), struck)]
-            for field, records in raw_evidence.items()
-            if isinstance(records, list)
-        }
-    return notes, payload
+        for field, observed in kept_values.items():
+            records = raw_evidence.get(field)
+            if not isinstance(records, list):
+                integrity_error = True
+                continue
+            retained = [
+                record for record in records
+                if isinstance(record, dict)
+                and record.get("value") in observed
+                and not _value_is_struck(record.get("value", ""), struck)
+                and not _value_is_tainted(
+                    field, record.get("value", ""), strike_taints)
+            ]
+            covered = {record.get("value") for record in retained}
+            bound_values = [value for value in observed if value in covered]
+            if set(bound_values) != set(observed):
+                integrity_error = True
+            if bound_values:
+                values[field] = bound_values
+                evidence[field] = [
+                    record for record in retained
+                    if record.get("value") in set(bound_values)]
+    payload["values"] = values
+    payload["evidence"] = evidence
+    payload["conflicts"] = sorted(
+        field for field, observed in values.items() if len(observed) > 1)
+    return notes, payload, integrity_error
 
 
 def _baseline_selected_candidate(state, field):
@@ -1122,9 +1387,13 @@ def _baseline_selected_candidate(state, field):
     if any(not isinstance(candidate, (list, tuple)) or len(candidate) < 4
            for candidate in candidates):
         return None, "ambiguous"
-    candidates = [candidate for candidate in candidates
-                  if not _value_is_struck(
-                      candidate[0], state.get("struck_values", []))]
+    strike_taints = _state_strike_taints(state)
+    candidates = [
+        candidate for candidate in candidates
+        if (not _candidate_is_struck(
+                candidate, state.get("struck_values", []))
+            and not _value_is_tainted(
+                field, candidate[0], strike_taints))]
     composited = state.get("composited_rank1_payload", {})
     values = composited.get("values", {}) if isinstance(
         composited, dict) else {}
@@ -1135,9 +1404,10 @@ def _baseline_selected_candidate(state, field):
         return None, "ambiguous"
     signed_values = [
         value for value in signed_values
-        if not _value_is_struck(
-            value, state.get("struck_authority_values",
-                             state.get("struck_values", [])))]
+        if (not _value_is_struck(
+                value, state.get("struck_authority_values",
+                                 state.get("struck_values", [])))
+            and not _value_is_tainted(field, value, strike_taints))]
     candidates.extend([
         [value, "manual_correction", 1, 99.0, value]
         for value in signed_values
@@ -1450,7 +1720,8 @@ def _extract_baseline_state(pdf_path, doc, raw_pdf):
         page_texts.append("\n".join(s.text for s in visible if s.page == pno))
 
     # Trusted text-layer extraction (native letters + visible slip labels).
-    text_fields = extract.extract_from_visible_text(case_id, page_texts)
+    text_fields = extract.extract_from_visible_text(
+        case_id, page_texts, include_raw=True)
 
     dump_raw = os.environ.get("MIB_DUMP_RAW", "0") == "1"
     raw_pages = []
@@ -1661,6 +1932,8 @@ def _extract_baseline_state(pdf_path, doc, raw_pdf):
     struck_authority_values = sorted(struck_authority_values)
     composited_rank1_payload = _composited_rank1_attestation(
         baseline_note_views)
+    rank1_strike_aliases = _rank1_strike_alias_attestation(
+        baseline_note_views)
 
     candidate_records = sorted(per_page)
     candidate_page_types, candidate_type_by_no = _page_types(
@@ -1668,8 +1941,9 @@ def _extract_baseline_state(pdf_path, doc, raw_pdf):
 
     # Pool OCR and text-layer candidates; keep the full pool for corroboration.
     pools = {}
-    for field, (value, source) in text_fields.items():
-        pools.setdefault(field, []).append([value, source, TEXT_SOURCE_RANK.get(source, 6), 95.0, value])
+    for field, (value, source, raw) in text_fields.items():
+        pools.setdefault(field, []).append([
+            value, source, TEXT_SOURCE_RANK.get(source, 6), 95.0, raw])
     for field, cands in ocr_candidates.items():
         pools.setdefault(field, []).extend([list(c) for c in cands])
 
@@ -1851,6 +2125,7 @@ def _extract_baseline_state(pdf_path, doc, raw_pdf):
         "pools": pools,
         "doc_notes": doc_notes,
         "composited_rank1_payload": composited_rank1_payload,
+        "rank1_strike_aliases": rank1_strike_aliases,
         "page_types": candidate_page_types,
         "n_scan_pages": len(scan_pages),
         "image_views": [image_views[p] for p in sorted(image_views)],
@@ -2201,15 +2476,65 @@ def decide(state, receipt_date=None, batch_revoked=frozenset()):
     # false-positive strike can therefore cause a hedge, never an approval.
     struck = set(state.get("struck_values", []))
     authority_struck = set(state.get("struck_authority_values", struck))
-    doc_notes, composited_rank1_payload = _sanitize_rank1_strikes(
-        state.get("doc_notes", {}),
-        state.get("composited_rank1_payload", {}), authority_struck)
-    strike_approval_block_fields = _strike_approval_block_fields(
-        struck, pools, batch_revoked) if struck else frozenset()
-    if struck:
-        pools = {f: kept for f, cands in pools.items()
-                 if (kept := [c for c in cands
-                              if not _value_is_struck(c[0], struck)])}
+    aliases = state.get("rank1_strike_aliases", [])
+    global_alias_taints = (
+        set(_strike_alias_taints(pools, struck))
+        | set(_rank1_alias_taints(aliases, struck))
+        | set(_targeted_source_alias_taints(pools, struck)))
+    local_rank1_alias_taints = (
+        set(_strike_alias_taints(
+            pools, authority_struck, rank1_only=True))
+        | set(_rank1_alias_taints(aliases, authority_struck)))
+    strike_taints = frozenset(
+        global_alias_taints | local_rank1_alias_taints)
+    ambiguous_authority_struck = authority_struck - struck
+    raw_doc_notes = state.get("doc_notes", {})
+    raw_composited_rank1_payload = state.get("composited_rank1_payload", {})
+    recovered_approval_strike_guard = bool(
+        authority_struck
+        and isinstance(raw_doc_notes, dict)
+        and raw_doc_notes.get("recovered_finding") == "APPROVED")
+    (struck_rank1_block_fields,
+     struck_adverse_finding) = _struck_rank1_approval_guards(
+        raw_doc_notes, raw_composited_rank1_payload,
+        ambiguous_authority_struck,
+        batch_revoked, strike_taints)
+    struck_rank1_block_fields = frozenset(
+        set(struck_rank1_block_fields)
+        | set(_struck_rank1_pool_approval_guards(
+            pools, ambiguous_authority_struck, strike_taints,
+            batch_revoked)))
+    (doc_notes, composited_rank1_payload,
+     rank1_payload_integrity_error) = _sanitize_rank1_strikes(
+        raw_doc_notes, raw_composited_rank1_payload, authority_struck,
+        strike_taints)
+    ordinary_strike_approval_block_fields = (
+        _strike_approval_block_fields(struck, pools, batch_revoked)
+        if struck else frozenset())
+    alias_strike_approval_block_fields = _strike_approval_block_fields(
+        (), pools, batch_revoked, strike_taints)
+    if struck or authority_struck or strike_taints:
+        filtered_pools = {}
+        for field, candidates in pools.items():
+            kept = [
+                candidate for candidate in candidates
+                if (not _candidate_is_struck(candidate, struck)
+                    and not (_candidate_is_rank1(candidate)
+                             and _candidate_is_struck(
+                                 candidate, authority_struck))
+                    and not _value_is_tainted(
+                        field, candidate[0], strike_taints))]
+            if kept:
+                filtered_pools[field] = kept
+        pools = filtered_pools
+
+    # Helpers used later in adjudication must see the same sanitized authority
+    # and field-bound alias taint as the main selector.  Keep caller state pure.
+    state = dict(state)
+    state["pools"] = pools
+    state["doc_notes"] = doc_notes
+    state["composited_rank1_payload"] = composited_rank1_payload
+    state["_strike_taints"] = sorted(strike_taints)
 
     # Year-garble arbitration: en_v5 misreads a year digit ("2026"->"2028")
     # often enough to have needed the epoch deadband and the future-arrival
@@ -2532,7 +2857,7 @@ def decide(state, receipt_date=None, batch_revoked=frozenset()):
     composited_conflicts = set(composited.get("conflicts", ())) \
         if isinstance(composited, dict) else set()
     reconciled_fields = {
-        field for field in strike_approval_block_fields
+        field for field in ordinary_strike_approval_block_fields
         if field not in composited_conflicts
         and isinstance(composited_values.get(field), list)
         and len(composited_values[field]) == 1
@@ -2540,8 +2865,20 @@ def decide(state, receipt_date=None, batch_revoked=frozenset()):
         and composited_values[field][0]
     }
     unresolved_strike_fields = (
-        strike_approval_block_fields - reconciled_fields)
-    if (decision == "APPROVED" and unresolved_strike_fields
+        ordinary_strike_approval_block_fields - reconciled_fields)
+    ambiguous_rank1_adverse = bool(
+        struck_rank1_block_fields or struck_adverse_finding
+        or alias_strike_approval_block_fields
+        or recovered_approval_strike_guard)
+    if (decision == "APPROVED"
+            and (ambiguous_rank1_adverse
+                 or rank1_payload_integrity_error)):
+        # Ambiguous/aliased adverse cancellation and malformed authority
+        # provenance are never approval evidence. A surviving benign correction
+        # or APPROVED finding cannot reconcile these cases; review is the only
+        # safe terminal result.
+        decision, reasons = "NEEDS_REVIEW", ["strike_cancellation_guard"]
+    elif (decision == "APPROVED" and unresolved_strike_fields
             and not trusted_rank1_approval):
         decision, reasons = "NEEDS_REVIEW", ["strike_cancellation_guard"]
 

@@ -90,7 +90,8 @@ def build_native_ledger(doc, case_id, baseline_aux=None):
     for pno in range(len(doc)):
         page_texts.append("\n".join(s.text for s in visible if s.page == pno))
 
-    text_fields = extract.extract_from_visible_text(case_id, page_texts)
+    text_fields = extract.extract_from_visible_text(
+        case_id, page_texts, include_raw=True)
 
     view_registry = pipeline._new_image_view_registry()
     per_page = []
@@ -332,6 +333,8 @@ def build_native_ledger(doc, case_id, baseline_aux=None):
     struck_authority_values = sorted(struck_authority_values)
     composited_rank1_payload = pipeline._composited_rank1_attestation(
         _active_notes())
+    rank1_strike_aliases = pipeline._rank1_strike_alias_attestation(
+        _active_notes())
 
     ordered = _active(sorted(per_page))
     page_types = [record[2][0] for record in ordered]
@@ -339,10 +342,10 @@ def build_native_ledger(doc, case_id, baseline_aux=None):
                   for _, page_number, parsed in ordered}
 
     pools = {}
-    for field, (value, source) in text_fields.items():
+    for field, (value, source, raw) in text_fields.items():
         pools.setdefault(field, []).append(
             [value, source, pipeline.TEXT_SOURCE_RANK.get(source, 6), 95.0,
-             value])
+             raw])
     for field, cands in ocr_candidates.items():
         pools.setdefault(field, []).extend([list(c) for c in cands])
 
@@ -362,6 +365,7 @@ def build_native_ledger(doc, case_id, baseline_aux=None):
         "pools": pools,
         "doc_notes": doc_notes,
         "composited_rank1_payload": composited_rank1_payload,
+        "rank1_strike_aliases": rank1_strike_aliases,
         "page_types": page_types,
         "n_scan_pages": len(scan_pages),
         "authorized_scan_pages": authorized_scan_pages,

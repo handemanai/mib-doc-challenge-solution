@@ -2390,9 +2390,8 @@ def struck_value_sets(doc, visible_spans):
                 if len(word) < 5:
                     return set(), set()
                 tokens = _strike_tokens(word[4])
-                if len(tokens) != 1:
+                if not tokens:
                     continue
-                token = tokens[0]
                 word_rect = fitz.Rect(word[:4])
                 if (not np.isfinite([*word[:4]]).all()
                         or word_rect.width <= 0 or word_rect.height <= 0
@@ -2402,7 +2401,7 @@ def struck_value_sets(doc, visible_spans):
                     (span, text_sequence)
                     for span, span_rect, span_tokens, text_sequence
                     in sequence_trusted
-                    if span_tokens.count(token) == 1
+                    if all(span_tokens.count(token) == 1 for token in tokens)
                     and _covered(word_rect, [span_rect], frac=0.6)
                 ]
                 if len(bindings) != 1:
@@ -2435,7 +2434,8 @@ def struck_value_sets(doc, visible_spans):
                         continue
                     is_struck = True
                     break
-                occurrences.setdefault(token, []).append(is_struck)
+                for token in tokens:
+                    occurrences.setdefault(token, []).append(is_struck)
 
         global_values = {
             token for token, states in occurrences.items()

@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from mib.pipeline import _sanitize_rank1_strikes
 from tools.native_artifact_binding import (EFFECTIVE_CONFIG_DEFAULTS,
                                            EXPECTED_RUNTIME_REPO_PATHS,
                                            PIX_ALLOWED_VALUES,
@@ -609,6 +610,27 @@ def _set_composited_values(row, field, observed):
     payload["conflicts"] = sorted(
         name for name, field_values in payload["values"].items()
         if len(field_values) > 1)
+
+
+def test_strike_sanitizer_preserves_binder_payload_invariants():
+    row = _evidence("MIB-000001", finding="APPROVED")
+    _set_composited_values(row, "fee_status", ["paid", "unpaid"])
+
+    _, payload, integrity_error = _sanitize_rank1_strikes(
+        {}, row["composited_rank1_payload"], {"approved", "unpaid"})
+    row["composited_rank1_payload"] = payload
+
+    assert integrity_error is False
+    assert payload == {
+        "values": {"fee_status": ["paid"]},
+        "conflicts": [],
+        "evidence": {"fee_status": [{
+            "value": "paid",
+            "origin": {"page": 0, "view": "masked_pdf_render",
+                       "dpi": 150, "pass": "fast"},
+        }]},
+    }
+    _validate_evidence_rows([row])
 
 
 @pytest.mark.parametrize(("field", "value", "confidence"), [

@@ -15,7 +15,7 @@ stamps (INTAKE/ARCHIVE/FILED/COPY) are never evidence.
 import re
 
 from .vocab import (CASE_RE, DATE_RE, FEES, FLAGS, PURPOSES, SPECIES,
-                    SPONSOR_RE, VISAS, WORLDS, snap)
+                    SPONSOR_RE, VISAS, WORLDS, semantically_negates, snap)
 
 _NOSPACE = staticmethod  # placeholder to keep module flat
 
@@ -151,7 +151,7 @@ def _fuzzy_prefix(prefix, norm):
 
 def _snap_value(field, raw):
     raw = raw.strip(" .:|")
-    if not raw:
+    if not raw or semantically_negates(raw):
         return None, 0.0
     if field == "applicant_name":
         from rapidfuzz import fuzz
@@ -166,7 +166,9 @@ def _snap_value(field, raw):
         return None, 0.0
     if field == "sponsor_id":
         m = SPONSOR_RE.search(raw.replace(" ", "").upper().replace("O", "0").replace("SPN.", "SPN-"))
-        return (m.group(), 95.0) if m else (None, 0.0)
+        return ((m.group(), 95.0)
+                if m and not semantically_negates(raw, m.group())
+                else (None, 0.0))
     if field == "arrival_date":
         squeezed = raw.replace(" ", "")
         m = DATE_RE.search(squeezed)
@@ -177,7 +179,8 @@ def _snap_value(field, raw):
             from datetime import date as _date
             try:
                 _date.fromisoformat(m.group())
-                return m.group(), 95.0
+                if not semantically_negates(raw, m.group()):
+                    return m.group(), 95.0
             except ValueError:
                 pass
         # OCR mangles separators ("tru202510.12" = 2025-10-12): find a year
@@ -188,7 +191,9 @@ def _snap_value(field, raw):
             if 1 <= mo <= 12 and 1 <= d <= 31:
                 try:
                     from datetime import date as _date
-                    return _date(y, mo, d).isoformat(), 80.0
+                    canonical = _date(y, mo, d).isoformat()
+                    if not semantically_negates(raw, canonical):
+                        return canonical, 80.0
                 except ValueError:
                     pass
         return None, 0.0
@@ -196,6 +201,8 @@ def _snap_value(field, raw):
              "declared_purpose": PURPOSES, "fee_status": FEES}.get(field)
     if vocab:
         value, score, _ = snap(raw, vocab, min_score=72)
+        if value and semantically_negates(raw, value):
+            return None, 0.0
         if field == "home_world" and value:
             # An embargo world is a deny trigger, so snapping INTO one needs
             # near-exact evidence: a private set can print worlds outside the
@@ -225,6 +232,32 @@ def _snap_value(field, raw):
         # catastrophic false-approval mechanism.
         return ("none", 40.0) if failed else ("none", 90.0)
     return None, 0.0
+
+
+_RANK1_ALIAS_TOKEN_RE = re.compile(
+    r"[A-Za-z0-9]+(?:[-_|][A-Za-z0-9]+)*")
+
+
+def _record_rank1_alias(notes, field, raw, value):
+    """Retain parser-accepted raw-to-canonical authority provenance.
+
+    This metadata is internal extraction state, not emitted evidence.  Every
+    detector-shaped component of an accepted raw value is retained, so
+    downstream matching stays exact even when OCR inserts spaces or separators.
+    """
+    raw = str(raw).strip(" .:|")
+    value = str(value).strip()
+    if not raw or not value or raw.lower() == value.lower():
+        return
+    aliases = notes.setdefault("_rank1_aliases", [])
+    # A parser-accepted value may be fragmented by OCR punctuation/spaces
+    # (``SPN - O678``, ``DIP- l``).  The strike detector reports the exact
+    # lexical component covered by the vector line, so retain every component
+    # of the accepted raw value rather than silently dropping multi-token raw.
+    for token in _RANK1_ALIAS_TOKEN_RE.findall(raw):
+        record = {"raw": token.lower(), "value": value, "field": field}
+        if record not in aliases:
+            aliases.append(record)
 
 
 _NAME_VOCAB = None
@@ -340,6 +373,7 @@ def parse_page(lines):
              "name_correction": None, "waiver_code": None, "absent_fields": [],
              "corrections": {}, "harvested": {}, "signed_fields": {},
              "rank1_observations": {},
+             "_rank1_aliases": [],
              "registry_embargo": False}
     # Visible-decoy guard: a page that carries answer-key phrasing in VISIBLE
     # text gets no bare-value harvesting (labeled template reads only).
@@ -371,6 +405,13 @@ def parse_page(lines):
         if m:
             key = re.sub(r"\s", "", m.group(1).lower())
             raw_val = m.group(2).strip(" .")
+            # A slash splits one viewer word into multiple detector tokens;
+            # forensics deliberately refuses such ambiguous word geometry, so
+            # accepting a slash-garbled approval-side correction would make it
+            # impossible for a visible vector strike to cancel that authority.
+            # Legal sponsor, visa, and fee values never contain ``/``.
+            unsafe_value_separator = "/" in raw_val
+            negated_value = semantically_negates(raw_val)
             if key == "applicant":
                 nm = re.match(r"([A-Z][a-z]+)\s*([A-Z][a-z]+)$", raw_val)
                 if nm:
@@ -380,28 +421,37 @@ def parse_page(lines):
                         "applicant_name", [])
                     if value not in observed:
                         observed.append(value)
-            elif key == "sponsor":
+            elif (key == "sponsor" and not unsafe_value_separator
+                  and not negated_value):
                 sm = SPONSOR_RE.search(raw_val.replace(" ", "").upper()
                                        .replace("O", "0").replace("SPN.", "SPN-"))
-                if sm:
+                if sm and not semantically_negates(raw_val, sm.group()):
                     value = sm.group()
                     notes.setdefault("corrections", {})["sponsor_id"] = value
+                    _record_rank1_alias(
+                        notes, "sponsor_id", raw_val, value)
                     observed = notes["rank1_observations"].setdefault(
                         "sponsor_id", [])
                     if value not in observed:
                         observed.append(value)
-            elif key == "visaclass":
+            elif (key == "visaclass" and not unsafe_value_separator
+                  and not negated_value):
                 v, _, _ = snap(raw_val.upper(), VISAS, min_score=70)
-                if v:
+                if v and not semantically_negates(raw_val, v):
                     notes.setdefault("corrections", {})["visa_class"] = v
+                    _record_rank1_alias(
+                        notes, "visa_class", raw_val, v)
                     observed = notes["rank1_observations"].setdefault(
                         "visa_class", [])
                     if v not in observed:
                         observed.append(v)
-            elif key == "feestatus":
+            elif (key == "feestatus" and not unsafe_value_separator
+                  and not negated_value):
                 v, _, _ = snap(raw_val.lower(), FEES, min_score=75)
-                if v:
+                if v and not semantically_negates(raw_val, v):
                     notes.setdefault("corrections", {})["fee_status"] = v
+                    _record_rank1_alias(
+                        notes, "fee_status", raw_val, v)
                     observed = notes["rank1_observations"].setdefault(
                         "fee_status", [])
                     if v not in observed:
@@ -445,9 +495,17 @@ def parse_page(lines):
                           r"([a-z_ |,]+)", text)
             if m:
                 parts = re.split(r"[|,;\s]+", m.group(1))
-                got = sorted({v for p in parts if len(p) >= 6
-                              for v, _, _ in [snap(p, FLAGS, min_score=82, rerank=False)]
-                              if v})
+                got = []
+                for part in parts:
+                    if len(part) < 6:
+                        continue
+                    value, _, _ = snap(
+                        part, FLAGS, min_score=82, rerank=False)
+                    if value:
+                        got.append(value)
+                        _record_rank1_alias(
+                            notes, "risk_flags", part, value)
+                got = sorted(set(got))
                 if got:
                     prev = fields.get("risk_flags")
                     merged = sorted(set(got) |
@@ -475,12 +533,26 @@ def parse_page(lines):
                     notes.setdefault("mined_revoked", []).append(
                         "SPN-" + digits)
 
-        m = re.search(r"(?i)finding[:.\s]*(approved|denied|needs[\s_-]*review|[A-Z_]{6,})", text)
+        m = re.search(
+            r"(?i)finding[:.\s]*"
+            r"(needs[\s_-]*review|"
+            r"[A-Z0-9]+(?:[\s_|-]+[A-Z0-9]+){0,2})"
+            r"(?=\s*(?:[.;]|$|reason\b))", text)
         if m and ptype == "adjudicator_note" and not WATERMARK_RE.search(text):
-            verdict, _, _ = snap(re.sub(r"[\s-]+", "_", m.group(1).upper()),
+            raw_verdict = m.group(1)
+            verdict, _, _ = snap(re.sub(r"[\s-]+", "_", raw_verdict.upper()),
                                  ["APPROVED", "DENIED", "NEEDS_REVIEW"], min_score=70)
+            raw_parts = re.findall(r"[A-Za-z0-9]+", raw_verdict)
+            raw_compact = "".join(raw_parts)
+            verdict_compact = re.sub(r"[^A-Za-z0-9]", "", verdict or "")
+            if (semantically_negates(raw_verdict, verdict)
+                    or verdict and abs(
+                        len(raw_compact) - len(verdict_compact)) > 2):
+                verdict = None
             notes["finding"] = verdict
             if verdict:
+                _record_rank1_alias(
+                    notes, "finding", raw_verdict, verdict)
                 observed = notes["rank1_observations"].setdefault(
                     "finding", [])
                 if verdict not in observed:
@@ -586,11 +658,15 @@ def parse_page(lines):
     # never on superseded receipts (ARCHIVE trap class), and never when the
     # document explicitly marks the status as absent/illegible — those cases
     # are under-determined by design and must keep hedging.
+    paid_amount_match = next(
+        (match for text in texts
+         if (match := _PAID_AMOUNT_RE.search(text))), None)
     if (ptype == "fee_receipt" and "fee_status" not in fields
             and "fee_status" not in notes["absent_fields"]
             and not any(_SUPERSEDED_RECEIPT_RE.search(t) for t in texts)
-            and any(_PAID_AMOUNT_RE.search(t) for t in texts)):
-        fields["fee_status"] = ("paid", 90.0, "amount_809_paid_indicator")
+            and paid_amount_match is not None):
+        fields["fee_status"] = (
+            "paid", 90.0, paid_amount_match.group(0))
     return ptype, fields, notes
 
 

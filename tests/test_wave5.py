@@ -8,9 +8,11 @@ from mib import extract, parse_ocr, rules
 from mib.forensics import (classify_spans, sanitize_text, struck_value_sets,
                            struck_values)
 from mib.pipeline import (FALLBACKS, TEXT_SOURCE_RANK,
+                          _composited_rank1_attestation,
+                          _rank1_strike_alias_attestation,
                           _retained_baseline_context_candidate,
                           _select_baseline_supported_candidate,
-                          batch_frequent_sponsors, decide)
+                          _tag_rank1_view, batch_frequent_sponsors, decide)
 
 
 def _fields(**over):
@@ -406,6 +408,455 @@ def test_local_struck_finding_cannot_hide_behind_unstruck_duplicate():
     assert detail["finding_note"] is None
 
 
+def _local_duplicate_strike_sets(value):
+    doc = _strike_doc(value)
+    duplicate_page = doc.new_page(width=612, height=792)
+    duplicate_page.insert_text((100, 100), value, fontsize=11)
+    return _strike_sets(doc)
+
+
+def _parsed_rank1_authority(line):
+    parsed = parse_ocr.parse_page([
+        ("Manual Adjudicator Note", 0.99),
+        ("Case: MIB-000002", 0.99),
+        (line, 0.99),
+    ])
+    _, doc_notes = parse_ocr.merge_candidates([parsed])
+    view = _tag_rank1_view(parsed, {
+        "page": 0, "view": "masked_pdf_render",
+        "dpi": 150, "pass": "fast",
+    })
+    if doc_notes.get("finding"):
+        doc_notes["finding_authority_origin"] = {
+            "view": "masked_pdf_render"}
+    return (
+        doc_notes,
+        _composited_rank1_attestation([view]),
+        _rank1_strike_alias_attestation([view]),
+    )
+
+
+@pytest.mark.parametrize("line", [
+    "Finding: NOT APPROVED",
+    "Finding: NO APPROVED",
+    "Finding: NEVER APPROVED",
+    "Finding: UNAPPROVED",
+    "Finding: UN-APPROVED",
+    "Finding: NOAPPROVED",
+])
+def test_negated_finding_never_acquires_approval_authority(line):
+    parsed = parse_ocr.parse_page([
+        ("Manual Adjudicator Note", 0.99), (line, 0.99)])
+    assert parsed[2]["finding"] is None
+    assert parsed[2]["_rank1_aliases"] == []
+
+
+@pytest.mark.parametrize(("field", "raw"), [
+    ("fee_status", "not paid"),
+    ("fee_status", "nonpaid"),
+    ("visa_class", "NOT-DIP-1"),
+    ("sponsor_id", "not SPN-0678"),
+    ("home_world", "not Luyten-b"),
+])
+def test_semantic_negation_never_snaps_to_ordinary_approval_evidence(
+        field, raw):
+    assert parse_ocr._snap_value(field, raw) == (None, 0.0)
+
+
+@pytest.mark.parametrize("line", [
+    "Manual correction: fee status is not paid",
+    "Manual correction: fee status is never paid",
+    "Manual correction: visa class is no DIP-1",
+    "Manual correction: sponsor is not SPN-0678",
+])
+def test_negated_manual_correction_never_acquires_authority(line):
+    parsed = parse_ocr.parse_page([
+        ("Manual Adjudicator Note", 0.99), (line, 0.99)])
+    assert parsed[2]["corrections"] == {}
+
+
+def test_negated_visible_visa_never_creates_dip1_exemption():
+    assert extract.extract_from_visible_text(
+        "MIB-000002", ["Visa class: NOT-DIP-1"],
+        include_raw=True) == {}
+
+
+@pytest.mark.parametrize(("raw", "line", "field", "canonical"), [
+    ("APPROVE0", "Finding: APPROVE0", "finding", "APPROVED"),
+    ("APPROV-0", "Finding: APPROV-0", "finding", "APPROVED"),
+    ("APPR0V-ED", "Finding: APPR0V-ED", "finding", "APPROVED"),
+    ("pald", "Manual correction: fee status is pald",
+     "fee_status", "paid"),
+    ("pa1d", "Manual correction: fee status is pa1d",
+     "fee_status", "paid"),
+    ("D1P-1", "Manual correction: visa class is D1P-1",
+     "visa_class", "DIP-1"),
+    ("DIP-l", "Manual correction: visa class is DIP-l",
+     "visa_class", "DIP-1"),
+    ("SPN-O678", "Manual correction: sponsor is SPN-O678",
+     "sponsor_id", "SPN-0678"),
+])
+def test_crossed_rank1_ocr_alias_cannot_override_adverse_ordinary_evidence(
+        raw, line, field, canonical):
+    global_values, authority_values = _local_duplicate_strike_sets(raw)
+    assert raw.lower() not in global_values
+    assert raw.lower() in authority_values
+
+    notes, payload, aliases = _parsed_rank1_authority(line)
+    assert payload["values"][field] == [canonical]
+    assert aliases == [{
+        "field": field, "raw": raw.lower(), "value": canonical,
+        "origin": {"page": 0, "view": "masked_pdf_render",
+                   "dpi": 150, "pass": "fast"},
+    }]
+
+    state = _approval_state()
+    if field == "finding":
+        state["pools"]["risk_flags"] = [[
+            "active_warrant", "biometric", 3, 95.0, "active_warrant"]]
+    elif field == "fee_status":
+        state["pools"]["fee_status"] = [[
+            "unpaid", "fee_receipt", 2, 95.0, "unpaid"]]
+    elif field == "visa_class":
+        state["pools"]["home_world"] = [[
+            "Wolf-1061c", "registry", 5, 95.0, "Wolf-1061c"]]
+        state["pools"]["visa_class"] = [[
+            "XW-1", "intake", 2, 95.0, "XW-1"]]
+    else:
+        state["pools"]["sponsor_id"] = [[
+            "SPN-0007", "sponsor_letter", 4, 95.0, "SPN-0007"]]
+    state["struck_values"] = sorted(global_values)
+    state["struck_authority_values"] = sorted(authority_values)
+    state["doc_notes"] = notes
+    state["composited_rank1_payload"] = payload
+    state["rank1_strike_aliases"] = aliases
+
+    prediction, detail = decide(state)
+    assert prediction["adjudication"] == "DENIED"
+    assert canonical not in {
+        value for values in detail["composited_rank1_payload"][
+            "values"].values() for value in values}
+
+
+@pytest.mark.parametrize(("struck_raw", "line", "field", "canonical"), [
+    ("O678", "Manual correction: sponsor is SPN - O678",
+     "sponsor_id", "SPN-0678"),
+    ("l", "Manual correction: visa class is DIP- l",
+     "visa_class", "DIP-1"),
+    ("0", "Finding: APPROVE 0", "finding", "APPROVED"),
+])
+def test_crossed_rank1_fragmented_alias_cannot_open_approval(
+        struck_raw, line, field, canonical):
+    global_values, authority_values = _local_duplicate_strike_sets(struck_raw)
+    notes, payload, aliases = _parsed_rank1_authority(line)
+    assert payload["values"][field] == [canonical]
+    assert any(record["raw"] == struck_raw.lower()
+               and record["field"] == field
+               and record["value"] == canonical for record in aliases)
+
+    state = _approval_state()
+    if field == "sponsor_id":
+        state["pools"][field] = [[
+            "SPN-0007", "sponsor_letter", 4, 95.0, "SPN-0007"]]
+    elif field == "visa_class":
+        state["pools"]["home_world"] = [[
+            "Wolf-1061c", "registry", 5, 95.0, "Wolf-1061c"]]
+        state["pools"][field] = [[
+            "XW-1", "intake", 2, 95.0, "XW-1"]]
+    else:
+        state["pools"]["risk_flags"] = [[
+            "active_warrant", "biometric", 3, 95.0, "active_warrant"]]
+    state["struck_values"] = sorted(global_values)
+    state["struck_authority_values"] = sorted(authority_values)
+    state["doc_notes"] = notes
+    state["composited_rank1_payload"] = payload
+    state["rank1_strike_aliases"] = aliases
+
+    prediction, _ = decide(state)
+    assert prediction["adjudication"] == "DENIED"
+
+
+@pytest.mark.parametrize(("raw", "line", "field"), [
+    ("DIP/1", "Manual correction: visa class is DIP/1", "visa_class"),
+    ("pa/id", "Manual correction: fee status is pa/id", "fee_status"),
+])
+def test_detector_unsupported_slash_alias_never_acquires_rank1_authority(
+        raw, line, field):
+    # A full-word strike covers every lexical component, but slash-garbled
+    # approval-side corrections remain outside the legal signed grammar.
+    global_values, authority_values = _strike_sets(_strike_doc(raw))
+    assert global_values == authority_values
+    assert len(global_values) == 2
+    notes, payload, aliases = _parsed_rank1_authority(line)
+    assert field not in notes.get("corrections", {})
+    assert field not in payload["values"]
+    assert aliases == []
+
+    state = _approval_state()
+    if field == "visa_class":
+        state["pools"]["home_world"] = [[
+            "Wolf-1061c", "registry", 5, 95.0, "Wolf-1061c"]]
+        state["pools"]["visa_class"] = [[
+            "XW-1", "intake", 2, 95.0, "XW-1"]]
+    else:
+        state["pools"]["fee_status"] = [[
+            "unpaid", "fee_receipt", 2, 95.0, "unpaid"]]
+    state["doc_notes"] = notes
+    state["composited_rank1_payload"] = payload
+    state["rank1_strike_aliases"] = aliases
+
+    prediction, _ = decide(state)
+    assert prediction["adjudication"] == "DENIED"
+
+
+def test_crossed_visible_text_alias_retains_raw_and_cannot_create_dip1():
+    text_fields = extract.extract_from_visible_text(
+        "MIB-000002", ["Visa class: DIP-l"], include_raw=True)
+    assert text_fields["visa_class"] == ("DIP-1", "slip_label", "DIP-l")
+    global_values, authority_values = _strike_sets(
+        _strike_doc("Visa class: DIP-l"))
+
+    state = _approval_state()
+    state["struck_values"] = sorted(global_values)
+    state["struck_authority_values"] = sorted(authority_values)
+    value, source, raw = text_fields["visa_class"]
+    state["pools"]["visa_class"] = [[
+        value, source, TEXT_SOURCE_RANK[source], 95.0, raw]]
+    state["pools"]["home_world"] = [[
+        "Wolf-1061c", "registry", 5, 95.0, "Wolf-1061c"]]
+
+    prediction, _ = decide(state)
+    assert prediction["adjudication"] == "DENIED"
+
+
+def test_crossed_visible_text_fragment_retains_suffix_provenance():
+    text_fields = extract.extract_from_visible_text(
+        "MIB-000002", ["Visa class: DIP- l"], include_raw=True)
+    assert text_fields["visa_class"] == ("DIP-1", "slip_label", "DIP- l")
+    global_values, authority_values = _strike_sets(_strike_doc("l"))
+    state = _approval_state()
+    state["struck_values"] = sorted(global_values)
+    state["struck_authority_values"] = sorted(authority_values)
+    value, source, raw = text_fields["visa_class"]
+    state["pools"]["visa_class"] = [[
+        value, source, TEXT_SOURCE_RANK[source], 95.0, raw]]
+    state["pools"]["home_world"] = [[
+        "Wolf-1061c", "registry", 5, 95.0, "Wolf-1061c"]]
+    assert decide(state)[0]["adjudication"] == "DENIED"
+
+
+def test_crossed_paid_amount_cannot_supply_fee_approval_evidence():
+    global_values, authority_values = _strike_sets(_strike_doc("$809.00"))
+    assert global_values == authority_values == {"809", "00"}
+    parsed = parse_ocr.parse_page([
+        ("MIB Fee Receipt", 0.99), ("Total: $809.00", 0.99)])
+    assert parsed[1]["fee_status"] == ("paid", 90.0, "$809.00")
+
+    state = _approval_state()
+    state["struck_values"] = sorted(global_values)
+    state["struck_authority_values"] = sorted(authority_values)
+    state["pools"]["fee_status"] = [[
+        "paid", "fee_receipt", 2, 90.0, "$809.00"]]
+    prediction, _ = decide(state)
+    assert prediction["adjudication"] == "NEEDS_REVIEW"
+
+
+def test_canonical_only_fee_reader_cannot_bypass_matching_raw_alias_strike():
+    global_values, authority_values = _strike_sets(_strike_doc("pald"))
+    state = _approval_state()
+    state["struck_values"] = sorted(global_values)
+    state["struck_authority_values"] = sorted(authority_values)
+    state["pools"]["fee_status"] = [[
+        "paid", "fee_roi", 5, 95.0, "paid"]]
+
+    prediction, detail = decide(state)
+    assert prediction["adjudication"] == "NEEDS_REVIEW"
+    assert detail["reasons"] == ["insufficient_evidence:1"]
+
+
+@pytest.mark.parametrize(("field", "blocked", "clean"), [
+    ("fee_status", "unpaid", "paid"),
+    ("visa_class", "TRANSIT-7", "XW-1"),
+    ("sponsor_id", "SPN-0007", "SPN-0678"),
+    ("risk_flags", "active_warrant", "none"),
+])
+def test_local_strike_filters_generic_rank1_pool_candidate(
+        field, blocked, clean):
+    global_values, authority_values = _local_duplicate_strike_sets(clean)
+    state = _approval_state()
+    state["struck_values"] = sorted(global_values)
+    state["struck_authority_values"] = sorted(authority_values)
+    state["pools"][field] = [
+        [clean, "adjudicator_note", 1, 95.0, clean],
+        [blocked, "fee_receipt" if field == "fee_status" else "intake",
+         2, 95.0, blocked],
+    ]
+
+    prediction, _ = decide(state)
+    assert prediction["adjudication"] == "DENIED"
+
+
+def test_fully_struck_exact_rank1_pool_value_keeps_global_cancellation_rules():
+    global_values, authority_values = _strike_sets(_strike_doc("unpaid"))
+    assert global_values == authority_values == {"unpaid"}
+    state = _approval_state()
+    state["struck_values"] = sorted(global_values)
+    state["struck_authority_values"] = sorted(authority_values)
+    state["pools"]["fee_status"] = [
+        ["unpaid", "adjudicator_note", 1, 95.0, "unpaid"],
+        ["paid", "fee_receipt", 2, 95.0, "paid"],
+    ]
+    state["doc_notes"] = {
+        "finding": "APPROVED",
+        "finding_authority_origin": {"view": "masked_pdf_render"},
+    }
+    state["composited_rank1_payload"] = _composited_values(
+        finding="APPROVED")
+
+    prediction, detail = decide(state)
+    assert prediction["adjudication"] == "APPROVED"
+    assert detail["reasons"] == ["adjudicator_note"]
+
+
+def test_struck_alias_taint_cannot_be_reintroduced_by_canonical_paid_reader():
+    global_values, authority_values = _local_duplicate_strike_sets("pald")
+    state = _approval_state()
+    state["struck_values"] = sorted(global_values)
+    state["struck_authority_values"] = sorted(authority_values)
+    state["pools"]["fee_status"] = [
+        ["paid", "adjudicator_note", 1, 95.0, "pald"],
+        ["paid", "fee_roi", 5, 95.0, "paid"],
+        ["unpaid", "fee_receipt", 2, 95.0, "unpaid"],
+    ]
+
+    prediction, detail = decide(state)
+    assert prediction["fee_status"] == "unpaid"
+    assert prediction["adjudication"] == "DENIED"
+    assert detail["reasons"] == ["unpaid_fee"]
+
+
+def test_local_struck_denial_cannot_erase_unstruck_adverse_authority():
+    global_values, authority_values = _local_duplicate_strike_sets(
+        "Finding: DENIED")
+    assert "denied" not in global_values
+    assert "denied" in authority_values
+
+    state = _approval_state()
+    state["struck_values"] = sorted(global_values)
+    state["struck_authority_values"] = sorted(authority_values)
+    state["doc_notes"] = {
+        "finding": "DENIED",
+        "finding_authority_origin": {"view": "masked_pdf_render"},
+    }
+    state["composited_rank1_payload"] = _composited_values(
+        finding="DENIED")
+
+    prediction, detail = decide(state)
+    assert prediction["adjudication"] == "NEEDS_REVIEW"
+    assert detail["reasons"] == ["strike_cancellation_guard"]
+    assert detail["finding_note"] is None
+
+
+def test_fully_struck_denial_keeps_unambiguous_cancellation_behavior():
+    global_values, authority_values = _strike_sets(
+        _strike_doc("Finding: DENIED"))
+    assert "denied" in global_values
+    assert "denied" in authority_values
+
+    state = _approval_state()
+    state["struck_values"] = sorted(global_values)
+    state["struck_authority_values"] = sorted(authority_values)
+    state["doc_notes"] = {
+        "finding": "DENIED",
+        "finding_authority_origin": {"view": "masked_pdf_render"},
+    }
+    state["composited_rank1_payload"] = _composited_values(
+        finding="DENIED")
+
+    prediction, detail = decide(state)
+    assert prediction["adjudication"] == "APPROVED"
+    assert detail["reasons"] == ["clean"]
+    assert detail["finding_note"] is None
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("fee_status", "unpaid"),
+    ("risk_flags", "active_warrant"),
+    ("home_world", "Eris Relay"),
+    ("visa_class", "TRANSIT-7"),
+    ("sponsor_id", "SPN-0007"),
+    ("arrival_date", "2025-01-01"),
+])
+def test_local_strike_cannot_erase_unstruck_adverse_signed_field(field, value):
+    global_values, authority_values = _local_duplicate_strike_sets(value)
+    assert not global_values
+    assert authority_values
+
+    state = _approval_state()
+    state["struck_values"] = sorted(global_values)
+    state["struck_authority_values"] = sorted(authority_values)
+    state["doc_notes"]["corrections"] = {field: value}
+    state["composited_rank1_payload"] = _composited_values(
+        **{field: value})
+
+    prediction, detail = decide(state)
+    assert prediction["adjudication"] == "NEEDS_REVIEW"
+    assert detail["reasons"] == ["strike_cancellation_guard"]
+
+
+def test_surviving_paid_authority_cannot_reconcile_ambiguous_unpaid_strike():
+    global_values, authority_values = _local_duplicate_strike_sets("unpaid")
+    assert not global_values
+    assert "unpaid" in authority_values
+
+    state = _approval_state()
+    state["struck_values"] = sorted(global_values)
+    state["struck_authority_values"] = sorted(authority_values)
+    state["doc_notes"]["corrections"] = {"fee_status": "paid"}
+    state["composited_rank1_payload"] = {
+        "values": {"fee_status": ["unpaid", "paid"]},
+        "conflicts": [],
+        "evidence": {"fee_status": [
+            {"value": value, "origin": {
+                "page": 0, "view": "masked_pdf_render",
+                "dpi": 150, "pass": "fast"}}
+            for value in ["unpaid", "paid"]]},
+    }
+
+    prediction, detail = decide(state)
+    assert prediction["fee_status"] == "paid"
+    assert prediction["adjudication"] == "NEEDS_REVIEW"
+    assert detail["reasons"] == ["strike_cancellation_guard"]
+
+
+def test_trusted_approval_cannot_exempt_ambiguous_adverse_finding_strike():
+    global_values, authority_values = _local_duplicate_strike_sets("DENIED")
+    assert not global_values
+    assert "denied" in authority_values
+
+    state = _approval_state()
+    state["struck_values"] = sorted(global_values)
+    state["struck_authority_values"] = sorted(authority_values)
+    state["doc_notes"] = {
+        "finding": "APPROVED",
+        "finding_authority_origin": {"view": "masked_pdf_render"},
+    }
+    state["composited_rank1_payload"] = {
+        "values": {"finding": ["APPROVED", "DENIED"]},
+        "conflicts": [],
+        "evidence": {"finding": [
+            {"value": value, "origin": {
+                "page": 0, "view": "masked_pdf_render",
+                "dpi": 150, "pass": "fast"}}
+            for value in ["APPROVED", "DENIED"]]},
+    }
+
+    prediction, detail = decide(state)
+    assert detail["finding_note"] == "APPROVED"
+    assert prediction["adjudication"] == "NEEDS_REVIEW"
+    assert detail["reasons"] == ["strike_cancellation_guard"]
+
+
 def test_struck_signed_fee_correction_cannot_override_unpaid_evidence():
     state = _approval_state()
     state["pools"]["fee_status"] = [[
@@ -516,9 +967,15 @@ def _approval_state(candidate_sponsor="SPN-5678", candidate_visa="XW-1",
 
 
 def _composited_values(**values):
+    origin = {"page": 0, "view": "masked_pdf_render",
+              "dpi": 150, "pass": "fast"}
     return {
         "values": {field: [value] for field, value in values.items()},
-        "conflicts": [], "evidence": {},
+        "conflicts": [],
+        "evidence": {
+            field: [{"value": value, "origin": origin}]
+            for field, value in values.items()
+        },
     }
 
 
