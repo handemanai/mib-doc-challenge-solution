@@ -26,6 +26,13 @@ The Apache-2.0 text that covers this model, RapidOCR, and FlatBuffers is kept at
 license texts, this notice, and the repository MIT license to
 `/usr/share/doc/mib-solution/`.
 
+The final image also contains the three ONNX models bundled with RapidOCR. An
+inventory of application and bundled RapidOCR model artifacts counts 28,750,436
+bytes in total; the largest is RapidOCR's bundled
+`ch_PP-OCRv4_rec_infer.onnx` at 10,857,958 bytes. That recognizer is present as
+package data but is not selected by this runtime. Both figures remain far below
+the challenge's 1 GiB total and 250 MiB per-artifact limits.
+
 ## Runtime dependencies (installed at image build; not vendored here)
 
 Pinned in `Dockerfile`. Versions are exact because the score must reproduce from
@@ -53,10 +60,11 @@ a clean checkout.
 | sympy | 1.14.0 | BSD-3-Clause |
 | tqdm | 4.70.0 | MPL-2.0 AND MIT |
 
-`rapidocr-onnxruntime` bundles its own detection/classification ONNX models
+`rapidocr-onnxruntime` bundles its own detection, classification, and recognition
+ONNX models
 (`ch_PP-OCRv4_det`, `ch_PP-OCRv4_rec`, `ch_ppocr_mobile_v2.0_cls`), also
-PaddleOCR-derived and Apache-2.0. They are used for text detection; the
-recognizer above replaces the bundled `rec` model.
+PaddleOCR-derived and Apache-2.0. The bundled detector and classifier are used;
+the recognizer above replaces the bundled `rec` model.
 
 Python packaging tools (`pip`, `setuptools`, and `wheel`) come from the pinned
 base image rather than `requirements.txt`; their versions are therefore fixed
@@ -64,7 +72,7 @@ by the base digest. The installed wheels retain their own license files and
 third-party notices under `/usr/local/lib/python3.11/site-packages/` in the
 built image.
 
-The base is the linux/amd64 image
+The base is the multi-architecture image index
 `python:3.11-slim@sha256:db3ff2e1800a8581e2c48a27c3995339d47bdf046da21c7627accd3d51053a93`.
 It also installs Debian's `libgl1`, `libglib2.0-0`, and `libgomp1`; their
 copyright and license material remains available under `/usr/share/doc/` in the
