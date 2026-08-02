@@ -156,12 +156,19 @@ def test_campaign_timeout_defaults_are_synchronized(monkeypatch):
     assert RUN_SHARD_MODULE.CASE_TIMEOUT == 120
     assert RUN_SHARD_MODULE.MAX_CASES_PER_WORKER == 48
     assert RUN_SHARD_MODULE.RECYCLE_EXIT_CODE == 75
+    assert PREDICT_MODULE.MAX_RETRY_CASES == 128
     assert PREDICT_MODULE.RETRY_CASE_TIMEOUT == 130
     assert PREDICT_MODULE.RETRY_BUDGET_SECS == 1100
     assert PREDICT_MODULE.STUCK_SECS == 150
     assert PREDICT_MODULE.WORKER_RECYCLE_EXIT_CODE == 75
-    assert PREDICT_MODULE.RETRY_BUDGET_SECS >= \
+    # Candidate count handles plausible transient bursts.  It intentionally
+    # does not reserve 128 worst-case timeouts: the retry wall deadline is the
+    # time guarantee and always preserves the finalization reserve.
+    assert PREDICT_MODULE.RETRY_BUDGET_SECS < \
         PREDICT_MODULE.MAX_RETRY_CASES * PREDICT_MODULE.RETRY_CASE_TIMEOUT
+    assert PREDICT_MODULE.RETRY_BUDGET_SECS <= \
+        PREDICT_MODULE.BATCH_LIMIT_SECS - \
+        PREDICT_MODULE.FINALIZE_RESERVE_SECS
     # The heartbeat watchdog must never fire before the in-worker SIGALRM, or a
     # slow-but-progressing case gets killed instead of degrading cleanly.
     assert PREDICT_MODULE.STUCK_SECS > RUN_SHARD_MODULE.CASE_TIMEOUT
@@ -538,17 +545,18 @@ def test_decision_exception_is_visible_to_execution_failure_gate():
     assert "sensitive" not in json.dumps(detail)
 
 
-def test_retry_candidate_cap_and_batch_deadline(monkeypatch, tmp_path):
+def test_retry_candidate_cap_and_already_expired_batch_deadline(
+        monkeypatch, tmp_path):
     legacy = lambda cid: {"case_id": cid, "pools": {}, "doc_notes": {}}
-    assert PREDICT_MODULE.MAX_RETRY_CASES == 8
-    states = [legacy(f"MIB-99999{i}") for i in range(9)]
+    assert PREDICT_MODULE.MAX_RETRY_CASES == 128
+    states = [legacy(f"MIB-{800000 + i:06d}") for i in range(129)]
     monkeypatch.setattr(PREDICT_MODULE, "BATCH_LIMIT_SECS", 1000)
     monkeypatch.setattr(PREDICT_MODULE, "FINALIZE_RESERVE_SECS", 0)
     capped = PREDICT_MODULE._retry_failed_states(
         states, [], tmp_path, time.monotonic())
     assert all(s["extraction"]["attempts"][-1]["failure_category"] ==
-               "source_pdf_missing" for s in capped[:8])
-    assert capped[8]["extraction"]["attempts"][-1]["failure_category"] == \
+               "source_pdf_missing" for s in capped[:128])
+    assert capped[128]["extraction"]["attempts"][-1]["failure_category"] == \
         "retry_budget_exhausted"
 
     monkeypatch.setattr(PREDICT_MODULE, "BATCH_LIMIT_SECS", 0)
@@ -558,6 +566,90 @@ def test_retry_candidate_cap_and_batch_deadline(monkeypatch, tmp_path):
     assert deadline[0]["extraction"]["attempts"][-1]["status"] == "not_attempted"
     assert deadline[0]["extraction"]["attempts"][-1]["failure_category"] == \
         "retry_budget_exhausted"
+
+
+def test_more_than_eight_quick_retry_candidates_recover(monkeypatch, tmp_path):
+    count = 12
+    pdfs = []
+    states = []
+    for i in range(count):
+        cid = f"MIB-{810000 + i:06d}"
+        pdf = tmp_path / f"{cid}.pdf"
+        pdf.write_bytes(b"retry fixture")
+        pdfs.append(str(pdf))
+        states.append({"case_id": cid, "pools": {}, "doc_notes": {},
+                       "error": "worker exited"})
+
+    launched = []
+
+    def quick_worker(command, env, timeout):
+        launched.append((command, env, timeout))
+        return 0
+
+    def recovered_state(path, cid):
+        return {"case_id": cid, "pools": {"passport": [cid]},
+                "doc_notes": {}, "extraction": {
+                    "attempt_count": 1, "recovered": False,
+                    "attempts": [{"attempt": 2, "status": "success"}]}}
+
+    monkeypatch.setattr(PREDICT_MODULE, "_run_retry_worker", quick_worker)
+    monkeypatch.setattr(PREDICT_MODULE, "_read_retry_state", recovered_state)
+    recovered = PREDICT_MODULE._retry_failed_states(
+        states, pdfs, tmp_path, time.monotonic())
+
+    assert len(launched) == count
+    assert all(state["extraction"]["recovered"] is True
+               for state in recovered)
+    assert all(state["extraction"]["attempt_count"] == 2
+               for state in recovered)
+
+
+def test_retry_wall_deadline_stops_candidates_and_preserves_fallback(
+        monkeypatch, tmp_path):
+    count = 12
+    pdfs = []
+    states = []
+    for i in range(count):
+        cid = f"MIB-{820000 + i:06d}"
+        pdf = tmp_path / f"{cid}.pdf"
+        pdf.write_bytes(b"retry fixture")
+        pdfs.append(str(pdf))
+        states.append({"case_id": cid, "pools": {}, "doc_notes": {},
+                       "error": "worker exited"})
+
+    now = [0.0]
+    launched = []
+
+    def bounded_worker(command, env, timeout):
+        launched.append(timeout)
+        now[0] += 1.0
+        return 0
+
+    def recovered_state(path, cid):
+        return {"case_id": cid, "pools": {"passport": [cid]},
+                "doc_notes": {}, "extraction": {
+                    "attempt_count": 1, "recovered": False,
+                    "attempts": [{"attempt": 2, "status": "success"}]}}
+
+    monkeypatch.setattr(PREDICT_MODULE.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(PREDICT_MODULE, "RETRY_BUDGET_SECS", 5.0)
+    monkeypatch.setattr(PREDICT_MODULE, "BATCH_LIMIT_SECS", 100.0)
+    monkeypatch.setattr(PREDICT_MODULE, "FINALIZE_RESERVE_SECS", 10.0)
+    monkeypatch.setattr(PREDICT_MODULE, "_run_retry_worker", bounded_worker)
+    monkeypatch.setattr(PREDICT_MODULE, "_read_retry_state", recovered_state)
+
+    result = PREDICT_MODULE._retry_failed_states(
+        states, pdfs, tmp_path, batch_started=0.0)
+
+    assert len(launched) == 5
+    assert all(state["extraction"]["recovered"] is True
+               for state in result[:5])
+    assert all(state["extraction"]["recovered"] is False
+               for state in result[5:])
+    assert all(state["extraction"]["attempts"][-1] == {
+        "attempt": 2, "status": "not_attempted",
+        "failure_category": "retry_budget_exhausted"}
+        for state in result[5:])
 
 
 def test_retry_candidates_follow_original_pdf_order():

@@ -1023,7 +1023,7 @@ def test_binding_canonicalizes_config_and_rejects_output_or_input_drift(tmp_path
     assert binding["schema"] == SCHEMA
     assert binding["image_revision"] == sha
     assert binding["effective_config"]["MIB_NATIVE_SCAN_OCR"] == "1"
-    assert binding["effective_config"]["MIB_MAX_RETRY_CASES"] == "8"
+    assert binding["effective_config"]["MIB_MAX_RETRY_CASES"] == "128"
     assert binding["effective_config"]["MIB_CASE_TIMEOUT"] == "120"
     assert binding["effective_config"]["MIB_RETRY_CASE_TIMEOUT"] == "130"
     assert binding["effective_config"]["MIB_RETRY_BUDGET_SECS"] == "1100"

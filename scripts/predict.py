@@ -50,7 +50,11 @@ STUCK_SECS = float(os.environ.get("MIB_STUCK_SECS", "150"))
 STARTUP_GRACE = float(os.environ.get("MIB_STARTUP_GRACE", "120"))
 POLL_SECS = float(os.environ.get("MIB_WATCHDOG_POLL", "2"))
 MAX_NO_PROGRESS_RESPAWNS = 3
-MAX_RETRY_CASES = int(os.environ.get("MIB_MAX_RETRY_CASES", "8"))
+# The candidate ceiling is defense-in-depth, not the retry time budget.  It is
+# deliberately high enough for realistic transient-worker bursts in a 5,000
+# document run; RETRY_BUDGET_SECS and the batch-minus-finalize deadline below
+# remain the independent hard wall-clock bounds.
+MAX_RETRY_CASES = int(os.environ.get("MIB_MAX_RETRY_CASES", "128"))
 RETRY_CASE_TIMEOUT = float(os.environ.get("MIB_RETRY_CASE_TIMEOUT", "130"))
 RETRY_BUDGET_SECS = float(os.environ.get("MIB_RETRY_BUDGET_SECS", "1100"))
 RETRY_KILL_GRACE_SECS = float(os.environ.get("MIB_RETRY_KILL_GRACE_SECS", "5"))
@@ -456,7 +460,7 @@ def _effective_run_config():
         "MIB_DUMP_RAW": "0",
         "MIB_DISABLE_EXTRACTION_RETRY": "0",
         "MIB_WORKER_MAX_CASES": "48",
-        "MIB_MAX_RETRY_CASES": "8",
+        "MIB_MAX_RETRY_CASES": "128",
         "MIB_RETRY_CASE_TIMEOUT": "130",
         "MIB_RETRY_BUDGET_SECS": "1100",
         "MIB_RETRY_KILL_GRACE_SECS": "5",
@@ -857,9 +861,11 @@ def _retry_candidates(states, pdfs):
 def _retry_failed_states(states, pdfs, tmp, batch_started):
     """Retry failed/stub states once, serially, each in a fresh process.
 
-    The retry phase has three independent hard bounds: one attempt per case,
-    MAX_RETRY_CASES candidates, and a wall-clock deadline no later than both
-    RETRY_BUDGET_SECS from now and the batch cap minus finalization reserve.
+    The retry phase has three independent hard bounds: one attempt per case, a
+    defensive MAX_RETRY_CASES candidate ceiling, and a wall-clock deadline no
+    later than both RETRY_BUDGET_SECS from now and the batch cap minus the
+    finalization reserve.  The wall deadline, not candidate count multiplied by
+    the per-case timeout, is the time guarantee.
     """
     if os.environ.get("MIB_DISABLE_EXTRACTION_RETRY") == "1":
         return states
