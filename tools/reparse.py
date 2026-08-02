@@ -67,7 +67,10 @@ def rebuild_state(s):
     if "struck_values" not in out:
         pdf = CHALLENGE / "data" / "train" / f"{case_id}.pdf"
         if pdf.exists():
-            out["struck_values"] = sorted(forensics.struck_values(fitz.open(pdf)))
+            with fitz.open(pdf) as doc:
+                visible, _ = forensics.classify_spans(doc)
+                out["struck_values"] = sorted(
+                    forensics.struck_values(doc, visible))
     return out
 
 

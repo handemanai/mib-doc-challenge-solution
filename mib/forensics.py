@@ -2261,37 +2261,187 @@ def ocr_page_gray(doc, page, hidden_spans, dpi, visible_spans=None):
     }
 
 
-def struck_values(doc):
-    """Lowercased word texts cancelled by a colored strikethrough line.
+_STRIKE_TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:[-_|][A-Za-z0-9]+)*")
 
-    A colored (non-grayscale) thin vector line drawn through a word's bbox is a
-    manual cancellation mark — the field manual's "denial stamp crossed out"
-    rule generalized. Verified corpus-wide: across every training case with a
-    strike, the struck token is NEVER the true value of its field (112 dev
-    cases, 0 contradictions), for benign values as much as deny triggers, so a
-    struck read is dropped from evidence entirely. Grayscale ruling lines and
-    black underlines fail the color test and are ignored."""
-    out = set()
-    for page in doc:
-        words = None
-        for d in page.get_drawings():
-            col = d.get("color")
-            if col is None:
+
+def _strike_tokens(text):
+    """Return normalized lexical tokens used by strike cancellation."""
+    return [token.lower() for token in
+            _STRIKE_TOKEN_RE.findall(sanitize_text(str(text)))]
+
+
+def struck_values(doc, visible_spans):
+    """Return viewer-visible tokens cancelled by visible vector strikes.
+
+    ``get_text('words')`` exposes hidden and clipped text, so raw word geometry
+    is never authority by itself. Every word must bind unambiguously to the
+    frozen viewer-trusted span inventory on the same page. The strike itself
+    must be a visible, solid, colored line with sequence-bound path geometry.
+    If any occurrence of a token remains visibly unstruck, the document-global
+    cancellation representation cannot express locality safely and the token
+    is retained everywhere.
+
+    Any malformed or ambiguous PDF metadata fails closed by returning no
+    cancellation evidence.
+    """
+    try:
+        if not isinstance(visible_spans, (list, tuple)):
+            return set()
+        trusted_by_page = {}
+        visible_counts = {}
+        for span in visible_spans:
+            if not isinstance(span, Span) or span.hidden:
+                return set()
+            rect = fitz.Rect(span.bbox)
+            if (not np.isfinite([*span.bbox]).all()
+                    or rect.width <= 0 or rect.height <= 0):
+                return set()
+            tokens = _strike_tokens(span.text)
+            trusted_by_page.setdefault(span.page, []).append(
+                (span, rect, tokens))
+            for token in tokens:
+                visible_counts[token] = visible_counts.get(token, 0) + 1
+
+        occurrences = {}
+        for pno, page in enumerate(doc):
+            trusted = trusted_by_page.get(pno, ())
+            if not trusted:
                 continue
-            r, g, b = col
-            if abs(r - g) < 0.15 and abs(g - b) < 0.15:
-                continue                      # grayscale: gridline/underline
-            rect = d["rect"]
-            if rect.height > 6:
-                continue                      # not a thin strike line
-            if words is None:
-                words = page.get_text("words")
-            yc = (rect.y0 + rect.y1) / 2
-            for w in words:
-                if w[1] < yc < w[3] and \
-                        min(rect.x1, w[2]) - max(rect.x0, w[0]) > 0.5 * (w[2] - w[0]):
-                    out.add(w[4].lower().strip(".,:;"))
-    return out
+            crop = fitz.Rect(0, 0, page.cropbox.width, page.cropbox.height)
+            paint_log = page.get_bboxlog()
+            drawings = page.get_drawings(extended=True)
+            traces = page.get_texttrace()
+            later_covers, drawings_valid, clip_state_present = \
+                _opaque_paint_rects(page, paint_log)
+            if not drawings_valid or clip_state_present:
+                return set()
+            later_covers.extend(_opaque_text_paint_rects(
+                traces, paint_log))
+
+            # Recover the paint sequence belonging to each already-trusted
+            # span. This lets the strike path reject a word erased by later
+            # opaque paint even when the strike itself reintroduces contrast
+            # inside the larger containing text-span rectangle.
+            sequence_trusted = []
+            for span, span_rect, span_tokens in trusted:
+                trace_matches = []
+                for trace in traces:
+                    trace_rect = fitz.Rect(trace.get("bbox", ()))
+                    sequence = trace.get("seqno")
+                    trace_text = sanitize_text("".join(
+                        chr(character[0])
+                        for character in trace.get("chars", ())))
+                    if (isinstance(sequence, int)
+                            and 0 <= sequence < len(paint_log)
+                            and "text" in paint_log[sequence][0]
+                            and trace_text == span.text
+                            and _covered(span_rect, [trace_rect], frac=0.8)
+                            and _covered(trace_rect, [span_rect], frac=0.8)):
+                        trace_matches.append(sequence)
+                if len(trace_matches) != 1:
+                    return set()
+                sequence_trusted.append(
+                    (span, span_rect, span_tokens, trace_matches[0]))
+
+            strikes = []
+            for drawing in drawings:
+                if drawing.get("type") == "clip":
+                    continue
+                color = _normalized_rgb(drawing.get("color"))
+                if (color is None
+                        or any(component < 0 or component > 1
+                               for component in color)
+                        or (abs(color[0] - color[1]) < 0.15
+                            and abs(color[1] - color[2]) < 0.15)):
+                    continue
+                opacity = float(drawing.get("stroke_opacity"))
+                width = float(drawing.get("width"))
+                dash = _parse_dash_pattern(drawing.get("dashes"))
+                sequence = drawing.get("seqno")
+                if (not np.isfinite([opacity, width]).all()
+                        or opacity < MIN_TRUSTED_OPACITY
+                        - OPACITY_COMPARE_EPSILON
+                        or width <= 0 or width > 6
+                        or dash is None or dash[0]
+                        or not isinstance(sequence, int)
+                        or not 0 <= sequence < len(paint_log)
+                        or paint_log[sequence][0] != "stroke-path"):
+                    continue
+                for item in drawing.get("items") or ():
+                    if len(item) < 3 or item[0] != "l":
+                        continue
+                    first, last = item[1], item[2]
+                    coordinates = [first.x, first.y, last.x, last.y]
+                    if (not np.isfinite(coordinates).all()
+                            or not crop.contains(first)
+                            or not crop.contains(last)
+                            or abs(last.y - first.y) > max(1.0, width)):
+                        continue
+                    x0, x1 = sorted((first.x, last.x))
+                    y = (first.y + last.y) / 2.0
+                    if x1 - x0 <= 0:
+                        continue
+                    strikes.append((x0, x1, y, width, sequence,
+                                    later_covers))
+
+            for word in page.get_text("words"):
+                if len(word) < 5:
+                    return set()
+                tokens = _strike_tokens(word[4])
+                if len(tokens) != 1:
+                    continue
+                token = tokens[0]
+                word_rect = fitz.Rect(word[:4])
+                if (not np.isfinite([*word[:4]]).all()
+                        or word_rect.width <= 0 or word_rect.height <= 0
+                        or not _crop_contains_span(crop, word_rect)):
+                    continue
+                bindings = [
+                    (span, text_sequence)
+                    for span, span_rect, span_tokens, text_sequence
+                    in sequence_trusted
+                    if span_tokens.count(token) == 1
+                    and _covered(word_rect, [span_rect], frac=0.6)
+                ]
+                if len(bindings) != 1:
+                    continue
+                text_sequence = bindings[0][1]
+                word_occluders = [
+                    rect for cover_sequence, reason, rect, _ in later_covers
+                    if cover_sequence > text_sequence
+                    and reason in {"under_image", "under_fill", "under_text"}
+                ]
+                if _covered(word_rect, word_occluders, frac=0.6):
+                    continue
+
+                is_struck = False
+                for x0, x1, y, width, sequence, covers in strikes:
+                    overlap = min(x1, word_rect.x1) - max(x0, word_rect.x0)
+                    if (not word_rect.y0 < y < word_rect.y1
+                            or overlap <= 0.5 * word_rect.width):
+                        continue
+                    painted = fitz.Rect(
+                        max(x0, word_rect.x0), y - max(width / 2.0, 0.5),
+                        min(x1, word_rect.x1), y + max(width / 2.0, 0.5))
+                    occluders = [
+                        rect for cover_sequence, reason, rect, _ in covers
+                        if cover_sequence > sequence
+                        and reason in {"under_image", "under_fill",
+                                       "under_text"}
+                    ]
+                    if _covered(painted, occluders, frac=0.6):
+                        continue
+                    is_struck = True
+                    break
+                occurrences.setdefault(token, []).append(is_struck)
+
+        return {
+            token for token, states in occurrences.items()
+            if len(states) == visible_counts.get(token, 0)
+            and states and all(states)
+        }
+    except Exception:
+        return set()
 
 
 def injection_signals(hidden_spans):

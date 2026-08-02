@@ -5,7 +5,7 @@ import fitz
 import pytest
 
 from mib import extract, parse_ocr, rules
-from mib.forensics import sanitize_text, struck_values
+from mib.forensics import classify_spans, sanitize_text, struck_values
 from mib.pipeline import (FALLBACKS, TEXT_SOURCE_RANK,
                           _retained_baseline_context_candidate,
                           _select_baseline_supported_candidate,
@@ -189,25 +189,71 @@ def test_soft_embargo_still_dip1_exempt():
 
 
 # --------------------------------------------------------- strikethrough layer
-def _strike_doc(text, strike_color=(1, 0, 0)):
+def _strike_doc(text, strike_color=(1, 0, 0), *, text_kwargs=None,
+                strike_kwargs=None, x=100, occlude=False):
     doc = fitz.open()
-    page = doc.new_page()
-    page.insert_text((100, 100), text, fontsize=11)
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((x, 100), text, fontsize=11, **(text_kwargs or {}))
     words = page.get_text("words")
+    assert words
     x0, y0, x1, y1 = words[-1][:4]
+    if occlude:
+        page.draw_rect(
+            fitz.Rect(x0 - 2, y0 - 2, x1 + 2, y1 + 2),
+            color=None, fill=(1, 1, 1), fill_opacity=1.0, overlay=True)
     yc = (y0 + y1) / 2
     page.draw_line(fitz.Point(x0 - 2, yc), fitz.Point(x1 + 2, yc),
-                   color=strike_color, width=1)
+                   color=strike_color, width=1, **(strike_kwargs or {}))
     return doc
 
 
+def _struck(doc):
+    visible, _ = classify_spans(doc)
+    return struck_values(doc, visible)
+
+
 def test_struck_word_detected():
-    assert "unpaid" in struck_values(_strike_doc("Fee Status: unpaid"))
+    assert "unpaid" in _struck(_strike_doc("Fee Status: unpaid"))
 
 
 def test_gray_line_not_a_strike():
-    assert struck_values(_strike_doc("Fee Status: unpaid",
-                                     strike_color=(0.5, 0.5, 0.5))) == set()
+    assert _struck(_strike_doc("Fee Status: unpaid",
+                               strike_color=(0.5, 0.5, 0.5))) == set()
+
+
+@pytest.mark.parametrize("stroke_opacity", [0.0, 0.05])
+def test_nonvisible_line_cannot_supply_strike_evidence(stroke_opacity):
+    assert _struck(_strike_doc(
+        "Fee Status: unpaid",
+        strike_kwargs={"stroke_opacity": stroke_opacity})) == set()
+
+
+@pytest.mark.parametrize("text_kwargs", [
+    {"color": (1, 1, 1)},
+    {"fill_opacity": 0.0},
+    {"fill_opacity": 0.05},
+    {"render_mode": 3},
+])
+def test_nonvisible_word_cannot_supply_strike_evidence(text_kwargs):
+    assert _struck(_strike_doc(
+        "Fee Status: unpaid", text_kwargs=text_kwargs)) == set()
+
+
+def test_partially_offcrop_word_cannot_supply_strike_evidence():
+    assert _struck(_strike_doc("unpaid", x=-10)) == set()
+
+
+def test_occluded_word_cannot_supply_strike_evidence():
+    assert _struck(_strike_doc(
+        "Fee Status: unpaid", occlude=True)) == set()
+
+
+@pytest.mark.parametrize("cross_page", [False, True])
+def test_unstruck_visible_duplicate_prevents_global_cancellation(cross_page):
+    doc = _strike_doc("unpaid")
+    page = doc.new_page(width=612, height=792) if cross_page else doc[0]
+    page.insert_text((100, 140), "unpaid", fontsize=11)
+    assert _struck(doc) == set()
 
 
 def test_struck_deny_trigger_never_denies():
@@ -221,6 +267,112 @@ def test_struck_deny_trigger_never_denies():
     pred, detail = decide(state)
     assert pred["adjudication"] != "DENIED"
     assert "unpaid_fee" not in detail["reasons"]
+
+
+def test_strike_cancellation_cannot_promote_ordinary_denial_to_approval():
+    state = _approval_state()
+    state["pools"]["risk_flags"] = [
+        ["biohazard_red", "biometric", 3, 95.0, "biohazard_red"],
+        ["none", "registry", 5, 95.0, "none"],
+    ]
+    state["struck_values"] = ["biohazard_red"]
+
+    prediction, detail = decide(state)
+    assert prediction["adjudication"] == "NEEDS_REVIEW"
+    assert detail["reasons"] == ["strike_cancellation_guard"]
+
+
+@pytest.mark.parametrize(("field", "blocked", "clean", "batch_revoked"), [
+    ("fee_status", "unpaid", "paid", frozenset()),
+    ("fee_status", "unknown", "paid", frozenset()),
+    ("fee_status", "waived", "paid", frozenset()),
+    ("visa_class", "TRANSIT-7", "XW-1", frozenset()),
+    ("home_world", "Eris Relay", "Luyten-b", frozenset()),
+    ("home_world", "Wolf-1061c", "Luyten-b", frozenset()),
+    ("sponsor_id", "SPN-0007", "SPN-5678", frozenset()),
+    ("sponsor_id", "SPN-8888", "SPN-5678", frozenset({"SPN-8888"})),
+    ("arrival_date", "2025-01-01", "2026-06-01", frozenset()),
+    ("risk_flags", "identity_conflict|none", "none", frozenset()),
+])
+def test_action_bearing_strike_cannot_open_approval(
+        field, blocked, clean, batch_revoked):
+    state = _approval_state()
+    state["pools"][field] = [
+        [blocked, "intake", 2, 95.0, blocked],
+        [clean, "registry", 5, 95.0, clean],
+    ]
+    state["struck_values"] = [blocked.lower()]
+
+    prediction, detail = decide(state, batch_revoked=batch_revoked)
+    assert prediction["adjudication"] == "NEEDS_REVIEW"
+    assert prediction["confidence"] == 0.15
+    assert detail["reasons"] == ["strike_cancellation_guard"]
+
+
+def test_benign_name_strike_does_not_demote_clean_approval():
+    state = _approval_state()
+    state["pools"]["applicant_name"] = [
+        ["Ari Vale", "intake", 2, 95.0, "Ari Vale"],
+        ["Tekdane Ixovara", "registry", 5, 95.0, "Tekdane Ixovara"],
+    ]
+    state["struck_values"] = ["ari"]
+    prediction, detail = decide(state)
+    assert prediction["adjudication"] == "APPROVED"
+    assert detail["reasons"] == ["clean"]
+
+
+@pytest.mark.parametrize("reconciled_field", ["fee_status", "applicant_name"])
+def test_only_matching_composited_correction_reconciles_action_strike(
+        reconciled_field):
+    state = _approval_state()
+    state["pools"]["fee_status"] = [
+        ["unpaid", "fee_receipt", 2, 95.0, "unpaid"],
+        ["paid", "registry", 5, 95.0, "paid"],
+    ]
+    state["struck_values"] = ["unpaid"]
+    value = "paid" if reconciled_field == "fee_status" else "Tekdane Ixovara"
+    state["doc_notes"]["corrections"] = {reconciled_field: value}
+    state["composited_rank1_payload"] = _composited_values(
+        **{reconciled_field: value})
+
+    prediction, detail = decide(state)
+    expected = "APPROVED" if reconciled_field == "fee_status" else "NEEDS_REVIEW"
+    assert prediction["adjudication"] == expected
+    assert detail["reasons"] == [
+        "clean" if expected == "APPROVED" else "strike_cancellation_guard"]
+
+
+def test_explicit_composited_rank1_approval_retains_precedence_over_strike():
+    state = _approval_state()
+    state["pools"]["fee_status"] = [
+        ["unpaid", "fee_receipt", 2, 95.0, "unpaid"],
+        ["paid", "registry", 5, 95.0, "paid"],
+    ]
+    state["struck_values"] = ["unpaid"]
+    state["doc_notes"] = {
+        "finding": "APPROVED",
+        "finding_authority_origin": {"view": "masked_pdf_render"},
+    }
+    prediction, detail = decide(state)
+    assert prediction["adjudication"] == "APPROVED"
+    assert detail["reasons"] == ["adjudicator_note"]
+
+
+def test_recovered_approval_cannot_bypass_action_strike_guard(monkeypatch):
+    monkeypatch.setenv("MIB_NOTE_ROI_APPROVE", "1")
+    state = _approval_state()
+    state["pools"]["fee_status"] = [
+        ["unpaid", "fee_receipt", 2, 95.0, "unpaid"],
+        ["paid", "registry", 5, 95.0, "paid"],
+    ]
+    state["struck_values"] = ["unpaid"]
+    state["doc_notes"].update({
+        "registry_embargo": True,
+        "recovered_finding": "APPROVED",
+    })
+    prediction, detail = decide(state)
+    assert prediction["adjudication"] == "NEEDS_REVIEW"
+    assert detail["reasons"] == ["strike_cancellation_guard"]
 
 
 # ----------------------------------------------------- registry status blocker

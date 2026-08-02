@@ -326,7 +326,7 @@ def build_native_ledger(doc, case_id, baseline_aux=None):
     pipeline._merge_rank1_authority(
         ocr_candidates, doc_notes, [], _active_notes())
 
-    struck_values = sorted(forensics.struck_values(doc))
+    struck_values = sorted(forensics.struck_values(doc, visible))
     composited_rank1_payload = pipeline._composited_rank1_attestation(
         _active_notes())
 

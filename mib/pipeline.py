@@ -983,7 +983,77 @@ def _value_is_struck(value, struck_values):
     struck = {str(value).lower() for value in struck_values}
     normalized = str(value).lower()
     return normalized in struck or any(
-        word.strip(".,:;") in struck for word in normalized.split())
+        word.strip(".,:;") in struck
+        for word in re.split(r"[|\s]+", normalized))
+
+
+def _strike_approval_block_fields(struck_values, pools, batch_revoked):
+    """Fields where cancellation can remove approval-blocking evidence.
+
+    The strike detector emits document-global lexical values and some readers
+    suppress those values before ``decide`` receives their candidates. Inspect
+    both the tokens and the surviving pre-filter pools so this guard covers
+    either route without penalizing benign crossed-out names or other fields.
+    """
+    struck = {str(value).lower() for value in struck_values}
+    affected = set()
+
+    def blocks(field, value):
+        normalized = str(value).strip()
+        lowered = normalized.lower()
+        if field == "risk_flags":
+            flags = {flag.lower() for flag in normalized.split("|")} - {
+                "", "none"}
+            return bool(flags & {
+                flag.lower() for flag in DISQUALIFYING_FLAGS | REVIEW_FLAGS})
+        if field == "fee_status":
+            return lowered in {"unpaid", "unknown", "waived"}
+        if field == "visa_class":
+            return lowered == "transit-7"
+        if field == "home_world":
+            return lowered in {
+                world.lower() for world in
+                rules.HARD_EMBARGO_WORLDS | rules.SOFT_EMBARGO_WORLDS}
+        if field == "sponsor_id":
+            return lowered in {
+                sponsor.lower() for sponsor in
+                rules.REVOKED_SPONSORS | set(batch_revoked)}
+        if field == "arrival_date":
+            try:
+                date.fromisoformat(normalized)
+                return True
+            except ValueError:
+                return False
+        return False
+
+    legal_values = {
+        "risk_flags": DISQUALIFYING_FLAGS | REVIEW_FLAGS,
+        "fee_status": {"unpaid", "unknown", "waived"},
+        "visa_class": {"TRANSIT-7"},
+        "home_world": (rules.HARD_EMBARGO_WORLDS |
+                       rules.SOFT_EMBARGO_WORLDS),
+        "sponsor_id": rules.REVOKED_SPONSORS | set(batch_revoked),
+    }
+    for token in struck:
+        token_flags = set(token.split("|")) - {"", "none"}
+        if token_flags & {
+                flag.lower() for flag in DISQUALIFYING_FLAGS | REVIEW_FLAGS}:
+            affected.add("risk_flags")
+        try:
+            date.fromisoformat(token)
+            affected.add("arrival_date")
+        except ValueError:
+            pass
+        for field, values in legal_values.items():
+            if any(_value_is_struck(value, {token}) for value in values):
+                affected.add(field)
+
+    for field, candidates in pools.items():
+        for candidate in candidates:
+            if (candidate and blocks(field, candidate[0])
+                    and _value_is_struck(candidate[0], struck)):
+                affected.add(field)
+    return frozenset(affected)
 
 
 def _baseline_selected_candidate(state, field):
@@ -1527,7 +1597,7 @@ def _extract_baseline_state(pdf_path, doc, raw_pdf):
     # Recompute once after HQ passes may have added pages.
     ocr_candidates, doc_notes = parse_ocr.merge_candidates(
         [record[2] for record in sorted(per_page)])
-    struck_values = sorted(forensics.struck_values(doc))
+    struck_values = sorted(forensics.struck_values(doc, visible))
     composited_rank1_payload = _composited_rank1_attestation(
         baseline_note_views)
 
@@ -2069,6 +2139,8 @@ def decide(state, receipt_date=None, batch_revoked=frozenset()):
     # is struck becomes unread and follows the normal hedge paths — a
     # false-positive strike can therefore cause a hedge, never an approval.
     struck = set(state.get("struck_values", []))
+    strike_approval_block_fields = _strike_approval_block_fields(
+        struck, pools, batch_revoked) if struck else frozenset()
     if struck:
         pools = {f: kept for f, cands in pools.items()
                  if (kept := [c for c in cands
@@ -2373,6 +2445,41 @@ def decide(state, receipt_date=None, batch_revoked=frozenset()):
               and noteread.approve_enabled()):
             decision, reasons = "APPROVED", ["recovered_adjudicator_note_approve"]
 
+    # Strike evidence is document-global while the underlying marks are local.
+    # Even after binding each strike to viewer-visible text, cancellation may
+    # erase an adverse OCR candidate from another page or evidence channel.
+    # Block approval only when an approval-bearing policy value was affected;
+    # benign crossed-out names and descriptive values retain their measured
+    # behavior. Explicit composited rank-1 authority may reconcile either the
+    # final finding or the particular affected field, but an unrelated signed
+    # correction cannot exempt another field.
+    trusted_rank1_approval = bool(
+        decision == "APPROVED"
+        and reasons == ["adjudicator_note"]
+        and doc_notes.get("finding") == "APPROVED"
+        and not doc_notes.get("rank1_conflicts")
+        and doc_notes.get("finding_authority_origin", {}).get("view")
+        in {"masked_pdf_render", "visible_text_layer"}
+    )
+    composited = state.get("composited_rank1_payload") or {}
+    composited_values = composited.get("values", {}) \
+        if isinstance(composited, dict) else {}
+    composited_conflicts = set(composited.get("conflicts", ())) \
+        if isinstance(composited, dict) else set()
+    reconciled_fields = {
+        field for field in strike_approval_block_fields
+        if field not in composited_conflicts
+        and isinstance(composited_values.get(field), list)
+        and len(composited_values[field]) == 1
+        and isinstance(composited_values[field][0], str)
+        and composited_values[field][0]
+    }
+    unresolved_strike_fields = (
+        strike_approval_block_fields - reconciled_fields)
+    if (decision == "APPROVED" and unresolved_strike_fields
+            and not trusted_rank1_approval):
+        decision, reasons = "NEEDS_REVIEW", ["strike_cancellation_guard"]
+
     rank1_payload = {
         "finding": doc_notes.get("finding"),
         "fields": {
@@ -2426,6 +2533,12 @@ def decide(state, receipt_date=None, batch_revoked=frozenset()):
         confidence = max(confidence, 0.9)
     if reasons and reasons[0] == "fee_prior_approval":
         confidence = 0.75           # measured slice accuracy (21/28 on dev)
+    if reasons and reasons[0] == "strike_cancellation_guard":
+        # This is a deliberate abstention because document-global cancellation
+        # cannot prove which evidence channel the local mark intended. Report
+        # that uncertainty directly instead of inheriting an ordinary review
+        # path's fitted confidence from a population without this mechanism.
+        confidence = 0.15
     # Reason-bucket shrink AFTER the floors so the shrink target is exactly
     # the post-floor confidence the OOF fit measured against.
     if _REASON_BUCKETS and reasons:
