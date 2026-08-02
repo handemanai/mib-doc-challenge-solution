@@ -91,10 +91,14 @@ that apply when the combined image is conveyed.
 
 ## Artifacts we produced (`models/`)
 
-None of these came from a third party. None is keyed to a case ID or contains a
-case-to-answer mapping. They were fit or constructed from the public training
-data (`data/train/` + `data/train_labels.csv`) and synthetic perturbations
-derived from it.
+These artifacts were produced for this solution; none is keyed to a case ID or
+contains a case-to-answer mapping. The public MIB Doc Challenge training packets
+and labels are Copyright (c) 2026 8090, Inc. and MIT-licensed in the challenge
+repository; its copyright notice and license text are retained at
+`THIRD_PARTY_LICENSES/MIB-Challenge-MIT.txt`. The coefficients, vocabulary, and
+pixel templates below were derived from that public data and synthetic
+perturbations. `pix_bank.npz` contains transformed visible line crops, not
+validation data or case-keyed answers.
 
 | File | What it is | Derived from |
 | --- | --- | --- |
