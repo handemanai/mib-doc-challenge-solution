@@ -13,7 +13,7 @@ this repository, not to the third-party components listed below.
 
 | File | Component | Upstream | License |
 | --- | --- | --- | --- |
-| `models/en_PP-OCRv5_rec_mobile.onnx` (7.9 MB; SHA-256 `c3461add59bb4323ecba96a492ab75e06dda42467c9e3d0c18db5d1d21924be8`) | PP-OCRv5 English mobile text-recognition model | [PaddleOCR / PaddlePaddle](https://github.com/PaddlePaddle/PaddleOCR), distributed as ONNX | Apache-2.0 |
+| `models/en_PP-OCRv5_rec_mobile.onnx` (7.9 MB; SHA-256 `c3461add59bb4323ecba96a492ab75e06dda42467c9e3d0c18db5d1d21924be8`) | PP-OCRv5 English mobile text-recognition model | [PaddleOCR / PaddlePaddle](https://github.com/PaddlePaddle/PaddleOCR), distributed in a [versioned RapidAI ONNX artifact](https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.0/onnx/PP-OCRv5/rec/en_PP-OCRv5_rec_mobile.onnx) | Apache-2.0 |
 
 The ONNX file is committed unchanged from the obtained model artifact and is
 the only third-party *artifact* committed to this repository. Its PaddlePaddle
@@ -35,8 +35,10 @@ the challenge's 1 GiB total and 250 MiB per-artifact limits.
 
 ## Runtime dependencies (installed at image build; not vendored here)
 
-Pinned in `Dockerfile`. Versions are exact because the score must reproduce from
-a clean checkout.
+Python package versions are pinned exactly in `Dockerfile`. Wheel files are not
+hash-locked, and the Debian libraries are resolved at build time from the
+repositories configured by the digest-pinned base image. The accepted release
+therefore binds the built image as well as the source checkout.
 
 | Package | Version | License |
 | --- | --- | --- |
@@ -89,9 +91,10 @@ that apply when the combined image is conveyed.
 
 ## Artifacts we produced (`models/`)
 
-None of these came from a third party, and none is keyed to a case ID or
-contains an answer. All were derived from the public training data
-(`data/train/` + `data/train_labels.csv`) that the challenge provides.
+None of these came from a third party. None is keyed to a case ID or contains a
+case-to-answer mapping. They were fit or constructed from the public training
+data (`data/train/` + `data/train_labels.csv`) and synthetic perturbations
+derived from it.
 
 | File | What it is | Derived from |
 | --- | --- | --- |
@@ -117,7 +120,6 @@ unreachable at run time (no code path queries the `Case ID:` label, and
 `case_id` is taken from the PDF filename stem, never from a pixel match), but a
 shipped artifact that greps as a per-PDF table is not worth defending, so they
 were removed. Dropping them is output-neutral, verified by byte-identical
-extraction states over a 20-case sample including the five slowest packets in
-the validation set.
+extraction states over a 20-case runtime stress sample.
 
 See `MEMO.md` for the decoder's actual role.

@@ -31,8 +31,8 @@ The target PDF is bound by SHA-256
 `f197d4be25fb96ebb6b69ca9c040f6340887405471b238219ba13a3cf2195fbc`.
 The frozen source commit is
 `e392ce99b134e75887a3a0950446760ed83ee114` (a pre-publication working-tree
-commit in the private experiment tree; the shipped `53dbe7a` state emits the
-identical fields and decision for this packet).
+commit in the private experiment tree). The final public runtime preserves the
+same fields and decision for this packet.
 
 The exact-pattern cohort was selected from visible cached state before opening
 its comparator labels. The target's already-known error motivated the

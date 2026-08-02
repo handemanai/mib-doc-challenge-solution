@@ -383,9 +383,9 @@ safety/grouped-evaluation gate.
 
 ## Closing addendum (2026-07-31)
 
-Final pre-submission measurements taken after this register's date. Each is a
-measured decline, not an open opportunity; none changed the shipped code or
-predictions.
+Additional measurements recorded on 2026-07-31 after this register's date.
+Each is a measured decline, not an open opportunity; none changed the
+then-current code or predictions.
 
 - **Hedge-resolution resolver (rival-style EV forest), measured on our 258
   eligible hedges:** in-sample +4.83 total at 13 catastrophic false approvals;
