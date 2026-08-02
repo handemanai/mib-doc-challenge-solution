@@ -25,6 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from mib import two_ledger  # noqa: E402
+from mib.caseid import canonical_pdf_paths  # noqa: E402
 from mib.pipeline import (FALLBACKS, batch_epoch, batch_frequent_sponsors,  # noqa: E402
                           decide)
 
@@ -1013,8 +1014,7 @@ def main():
     # Cheapest inputs first (size is a good proxy for raster/OCR load): if the
     # container is hard-stopped at the batch time limit, the interim flushes
     # then carry real extractions for the most cases. Deterministic tie-break.
-    pdfs = sorted((str(p) for p in Path(input_dir).glob("*.pdf")),
-                  key=lambda p: (os.path.getsize(p), p))
+    pdfs = [str(path) for path in canonical_pdf_paths(input_dir)]
 
     workers = min(4, os.cpu_count() or 1)
     tmp = Path(tempfile.mkdtemp(prefix="mib-", dir=os.environ.get("TMPDIR", "/tmp")))

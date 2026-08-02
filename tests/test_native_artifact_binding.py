@@ -1282,6 +1282,85 @@ def test_actual_producer_completion_receipt_binds_without_running_ocr(
         receipt.read_bytes()).hexdigest()
 
 
+def test_unequal_size_multi_pdf_order_matches_preflight_runtime_and_binder(
+        tmp_path, monkeypatch):
+    """The supervised identity uses the runtime's size-first packet order."""
+    pipeline_stub = types.ModuleType("mib.pipeline")
+    pipeline_stub.FALLBACKS = {}
+    pipeline_stub.batch_epoch = lambda states: None
+    pipeline_stub.batch_frequent_sponsors = lambda states: frozenset()
+    pipeline_stub.decide = lambda *args, **kwargs: ({}, {})
+    monkeypatch.setitem(sys.modules, "mib.pipeline", pipeline_stub)
+    spec = importlib.util.spec_from_file_location(
+        "mib_predict_multi_pdf_receipt_contract",
+        ROOT / "scripts" / "predict.py")
+    producer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(producer)
+
+    for key in list(os.environ):
+        if key.startswith("MIB_"):
+            monkeypatch.delenv(key, raising=False)
+    for key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        monkeypatch.setenv(key, "1")
+
+    repo, sha, manifest = _producer(tmp_path)
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    sizes = {"MIB-000001": 100, "MIB-000002": 20, "MIB-000003": 1}
+    for case_id, size in sizes.items():
+        (inputs / f"{case_id}.pdf").write_bytes(case_id.encode() + b"x" * size)
+
+    runtime_paths = producer.canonical_pdf_paths(inputs)
+    runtime_ids = [path.stem for path in runtime_paths]
+    assert runtime_ids == ["MIB-000003", "MIB-000002", "MIB-000001"]
+    assert runtime_ids != [path.stem for path in sorted(inputs.glob("*.pdf"))]
+
+    identity_path = tmp_path / "run-identity.json"
+    command = [
+        sys.executable, str(PREPARE_IDENTITY), "--repo", str(repo),
+        "--producer-sha", sha, "--image-id", IMAGE_ID,
+        "--image-inspect", str(manifest.parent / "image-inspect.json"),
+        "--runtime-manifest", str(manifest),
+        "--effective-config-json", "{}", "--input-dir", str(inputs),
+        "--split", "dev", "--run-nonce", "7" * 64,
+        "--output", str(identity_path),
+    ]
+    result = _run(command)
+    assert result.returncode == 0, result.stderr
+    identity = json.loads(identity_path.read_text())
+    entries = input_manifest(runtime_paths)
+    assert identity["input_manifest_sha256"] == canonical_sha256([
+        {key: entry[key] for key in ("ordinal", "case_id", "size", "sha256")}
+        for entry in entries
+    ])
+
+    directory = tmp_path / "multi-pdf-run"
+    predictions = directory / "predictions_dev.jsonl"
+    evidence = directory / "states_dev.jsonl"
+    receipt = directory / "run-receipt-dev.json"
+    worker_count = 2
+    prepared = producer._prepare_run_receipt(
+        receipt, identity_path, inputs, [str(path) for path in runtime_paths],
+        predictions, evidence, worker_count, "dev")
+    output_ids = [
+        case_id for shard in range(worker_count)
+        for case_id in runtime_ids[shard::worker_count]
+    ]
+    assert output_ids == ["MIB-000003", "MIB-000001", "MIB-000002"]
+    _write_jsonl(predictions, [_prediction(case_id) for case_id in output_ids])
+    _write_jsonl(evidence, [_evidence(case_id) for case_id in output_ids])
+    producer._publish_run_receipt(prepared)
+
+    binding_path = directory / "binding_dev.json"
+    result = _run(_binding_command(
+        repo, sha, manifest, inputs, directory, "dev",
+        output=binding_path, receipt=receipt))
+    assert result.returncode == 0, result.stderr
+    binding = verify_binding(binding_path)
+    assert [entry["case_id"] for entry in binding["input_manifest"]] == runtime_ids
+    assert binding["output_order_sha256"] == canonical_sha256(output_ids)
+
+
 @pytest.mark.parametrize("environment,error", [
     ({"MIB_TEST_HANG_CASE": "MIB-000001"}, "test/injection environment"),
     ({"MIB_UNKNOWN_SWITCH": "1"}, "unknown MIB environment"),

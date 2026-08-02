@@ -21,12 +21,25 @@ extraction, so multi-applicant decoy pages are still bound to the active id.
 
 import os
 import re
+from pathlib import Path
 
 CASE_ID_RE = re.compile(r"MIB-\d{6}")
 GHOST_CASE_ID = "MIB-000000"
 
 _FOOTER_RE = re.compile(r"Packet (MIB-\d{6}) / page \d+")
 _HEADER_RE = re.compile(r"(MIB-\d{6}) \| MIB Eyes Only")
+
+
+def canonical_pdf_paths(directory):
+    """Return input PDFs in the one order used by run identity and runtime.
+
+    Size-first ordering lets the runtime finish cheap packets first while the
+    absolute-path tie-break makes the manifest deterministic regardless of the
+    caller's working directory.
+    """
+    root = Path(directory).resolve(strict=True)
+    return sorted(root.glob("*.pdf"),
+                  key=lambda path: (path.stat().st_size, str(path)))
 
 
 def _document_votes(visible_spans):

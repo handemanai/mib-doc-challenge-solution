@@ -14,9 +14,13 @@ import math
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from datetime import date
 from pathlib import Path, PurePosixPath
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from mib.caseid import canonical_pdf_paths  # noqa: E402
 
 
 SCHEMA = "mib-native-artifact-binding-v3"
@@ -1312,7 +1316,8 @@ def _validate_input_source(source, entries):
         if set(source) != {"kind", "path"}:
             raise ValueError("sorted input source is malformed")
         directory = Path(source["path"]).resolve(strict=True)
-        if not directory.is_dir() or input_manifest(sorted(directory.glob("*.pdf"))) != entries:
+        if not directory.is_dir() or input_manifest(
+                canonical_pdf_paths(directory)) != entries:
             raise ValueError("sorted input directory differs from the binding")
     else:
         if set(source) != {"kind", "path", "sha256", "size"}:
@@ -1483,7 +1488,7 @@ def _input_paths(args):
     directory = Path(args.input_dir).resolve(strict=True)
     if not directory.is_dir():
         raise ValueError("input-dir is not a directory")
-    paths = sorted(directory.glob("*.pdf"))
+    paths = canonical_pdf_paths(directory)
     return paths, {"kind": "sorted_pdf_directory", "path": str(directory)}
 
 

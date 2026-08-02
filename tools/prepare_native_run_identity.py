@@ -27,6 +27,7 @@ from native_artifact_binding import (
     _validate_image_inspect,
     _validate_runtime_manifest,
     canonical_effective_config,
+    canonical_pdf_paths,
     canonical_sha256,
     input_manifest,
     sha256_file,
@@ -92,7 +93,7 @@ def main():
             raise ValueError("run identity split and partition disagree")
         if args.split == "validation" and args.partition != "all":
             raise ValueError("validation run identity must use the full partition")
-        pdfs = sorted(input_dir.glob("*.pdf"))
+        pdfs = canonical_pdf_paths(input_dir)
         if args.partition != "all":
             want_holdout = args.partition == "holdout-md5"
             pdfs = [
