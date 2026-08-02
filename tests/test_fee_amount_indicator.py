@@ -19,7 +19,9 @@ def test_indicator_fires_when_status_word_is_destroyed():
         "Fee Status", "#%@!", "Amount", "$809.00", "Waiver Code", "N/A"])
     assert ptype == "fee_receipt"
     assert fields["fee_status"][0] == "paid"
-    assert fields["fee_status"][2] == "amount_809_paid_indicator"
+    # Candidate provenance retains the exact visible amount rather than a
+    # synthetic source marker, so a vector strike can cancel this inference.
+    assert fields["fee_status"][2] == "$809.00"
 
 
 def test_ocr_garbled_amounts_still_indicate():
