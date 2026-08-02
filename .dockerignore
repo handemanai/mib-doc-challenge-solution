@@ -5,10 +5,10 @@ tools/
 data/
 out/
 .git/
-__pycache__/
-*.pyc
-.DS_Store
-.pytest_cache/
+**/__pycache__/
+**/*.py[cod]
+**/.DS_Store
+**/.pytest_cache/
 STRATEGY.md
 ADVERSARIAL_REVIEW.md
 *.ipynb
