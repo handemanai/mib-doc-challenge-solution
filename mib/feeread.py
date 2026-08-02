@@ -64,14 +64,16 @@ PAID_MARGIN = 0.06            # over the best non-paid value template
 
 # unpaid acceptance: "paid" substring shifted right by the "un" prefix. The
 # shift must be about one "un" width (~11px at 6.7pt): a true unpaid reads
-# paid_x=11, while washed "waived"/leading-smudge aliases cluster at x>=14
-# (measured on dev), so the upper bound is independent defense against them.
-UNPAID_PAID_NCC = 0.80        # the shifted "paid" match must be strong
+# paid_x=11. Wide-shift washed/leading-smudge aliases cluster at x>=14, while
+# some waived aliases land inside the true-unpaid geometry; the strength floor
+# and full-waived margin below are therefore independent defenses.
+UNPAID_PAID_NCC = 0.82        # the shifted "paid" match must be strong
 UNPAID_WHOLE_NCC = 0.50       # whole-"unpaid" template corroboration
 UNPAID_X_MIN = 8              # "paid" shifted at least one "un" width
 UNPAID_X_MAX = 13
 UNPAID_INK_MIN = 1.5          # "un" strokes fill the [0, paid_x) zone
 UNPAID_HEAD_DROP = 0.05       # shifted "paid" beats forced-at-head "paid"
+UNPAID_WAIVED_MARGIN = 0.12   # shifted "paid" must clearly beat full waived
 
 
 def enabled():
@@ -131,7 +133,8 @@ def _classify(feat, page_type, struck):
     if (p >= UNPAID_PAID_NCC and UNPAID_X_MIN <= px <= UNPAID_X_MAX
             and il >= UNPAID_INK_MIN
             and feat["unpaid_ncc"] >= UNPAID_WHOLE_NCC
-            and p > feat["waived_ncc"] and p > feat["unknown_ncc"]
+            and p - feat["waived_ncc"] >= UNPAID_WAIVED_MARGIN
+            and p > feat["unknown_ncc"]
             and feat["paid_head_ncc"] <= p - UNPAID_HEAD_DROP):
         if "unpaid" not in struck:
             return "unpaid"

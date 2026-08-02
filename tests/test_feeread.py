@@ -55,6 +55,38 @@ def test_waived_alias_not_read_as_unpaid():
     assert feeread._classify(f, "unknown", set()) is None
 
 
+def test_waived_alias_at_unpaid_geometry_needs_clear_value_margin():
+    # MIB-000284 is the strongest public-train waived-label alias in the
+    # prospectively frozen fee cohort: it satisfies the unpaid prefix geometry
+    # at x=11 but shifted "paid" beats full "waived" by only 0.108560.
+    f = _feat(label_ncc=0.849458, paid_ncc=0.820116, paid_x=11,
+              paid_head_ncc=0.713659, unpaid_ncc=0.594323,
+              waived_ncc=0.711556, unknown_ncc=0.520281,
+              ink_left_paid=2.0294)
+    assert feeread._classify(f, "fee_receipt", set()) is None
+
+
+def test_unpaid_waived_margin_boundary():
+    f = _feat(label_ncc=0.84, paid_ncc=0.88, paid_x=11,
+              paid_head_ncc=0.78, unpaid_ncc=0.56,
+              waived_ncc=0.76, unknown_ncc=0.48,
+              ink_left_paid=2.5)
+    assert feeread._classify(f, "unknown", set()) == "unpaid"
+    f["waived_ncc"] = 0.7601
+    assert feeread._classify(f, "unknown", set()) is None
+
+
+def test_weak_shifted_paid_alias_not_read_as_unpaid():
+    # MIB-000893 is a public-train paid-label case whose damaged receipt also
+    # satisfies the unpaid geometry. Its shifted paid match is only 0.815273;
+    # the three true-unpaid public candidates are all >= 0.830811.
+    f = _feat(label_ncc=0.851267, paid_ncc=0.815273, paid_x=11,
+              paid_head_ncc=0.674102, unpaid_ncc=0.559970,
+              waived_ncc=0.654934, unknown_ncc=0.510858,
+              ink_left_paid=2.0)
+    assert feeread._classify(f, "fee_receipt", set()) is None
+
+
 def test_wide_prefix_shift_not_unpaid():
     # A leading smudge on a paid receipt shifts the paid match to x>=14; only a
     # true "un" width (~11px) is accepted as unpaid.
