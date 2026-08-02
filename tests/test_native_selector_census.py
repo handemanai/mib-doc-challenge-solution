@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from mib.caseid import canonical_pdf_paths
 from tools.native_artifact_binding import (
     EFFECTIVE_CONFIG_DEFAULTS, _input_identity, canonical_sha256,
 )
@@ -44,7 +45,7 @@ def _bound_census_args(inputs, split="dev"):
         pytest.skip("git is required to build the producer-repo fixture")
     config = dict(EFFECTIVE_CONFIG_DEFAULTS, MIB_NATIVE_SCAN_OCR="1")
     entries = []
-    for ordinal, path in enumerate(sorted(inputs.glob("*.pdf"))):
+    for ordinal, path in enumerate(canonical_pdf_paths(inputs)):
         raw = path.read_bytes()
         entries.append({
             "ordinal": ordinal, "case_id": path.stem, "path": str(path),
@@ -54,7 +55,7 @@ def _bound_census_args(inputs, split="dev"):
     source_root = Path(__file__).resolve().parents[1]
     repo = inputs.parent / "producer"
     repo.mkdir()
-    for relative in ("mib/forensics.py", "tools/native_selector_census.py"):
+    for relative in selector_census.BOUND_SOURCE_PATHS:
         destination = repo / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes((source_root / relative).read_bytes())
@@ -115,6 +116,57 @@ def test_static_census_preserves_every_case_and_zero_count_categories(tmp_path):
     # No timestamps or host paths enter the report: the exact same bound
     # inputs and identity produce the exact same census payload.
     assert build_census(inputs, "dev", identity, config, repo) == report
+
+
+def test_static_census_uses_runtime_size_first_manifest_order(
+        tmp_path, monkeypatch):
+    inputs = tmp_path / "dev"
+    inputs.mkdir()
+    for case_id, padding in (
+            ("MIB-000001", 300), ("MIB-000002", 100), ("MIB-000003", 0)):
+        pdf = fitz.open()
+        pdf.new_page()
+        path = inputs / f"{case_id}.pdf"
+        pdf.save(path)
+        pdf.close()
+        if padding:
+            path.write_bytes(path.read_bytes() + b"x" * padding)
+
+    canonical_ids = [path.stem for path in canonical_pdf_paths(inputs)]
+    assert canonical_ids == ["MIB-000003", "MIB-000002", "MIB-000001"]
+    assert canonical_ids != [
+        path.stem for path in sorted(inputs.glob("*.pdf"))]
+
+    entries = []
+    for ordinal, path in enumerate(canonical_pdf_paths(inputs)):
+        raw = path.read_bytes()
+        entries.append({
+            "ordinal": ordinal, "case_id": path.stem, "path": str(path),
+            "size": len(raw), "sha256": __import__("hashlib").sha256(
+                raw).hexdigest(),
+        })
+    config = dict(EFFECTIVE_CONFIG_DEFAULTS, MIB_NATIVE_SCAN_OCR="1")
+    identity = {
+        "schema": "mib-run-identity-v1",
+        "producer_git_sha": "a" * 40,
+        "image_id": "sha256:" + "b" * 64,
+        "image_revision": "a" * 40,
+        "image_inspect_sha256": "c" * 64,
+        "runtime_manifest_sha256": "d" * 64,
+        "config_sha256": canonical_sha256(config),
+        "input_manifest_sha256": canonical_sha256(_input_identity(entries)),
+        "run_split": "dev",
+        "run_nonce": "e" * 64,
+    }
+    monkeypatch.setattr(
+        selector_census, "_verify_producer_source",
+        lambda *args: {"producer_git_sha": identity["producer_git_sha"],
+                       "files": []})
+    report = build_census(inputs, "dev", identity, config, tmp_path)
+
+    assert report["valid"] is True
+    assert [record["case_id"] for record in report["inputs"]] == canonical_ids
+    assert report["input_manifest_sha256"] == identity["input_manifest_sha256"]
 
 
 def test_long_census_uses_bounded_fresh_processes(tmp_path, monkeypatch):

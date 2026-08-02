@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from mib import forensics  # noqa: E402
+from mib import caseid, forensics  # noqa: E402
 from tools.native_artifact_binding import (  # noqa: E402
     _input_identity,
     _validate_run_identity,
@@ -26,7 +26,11 @@ from tools.native_artifact_binding import (  # noqa: E402
 
 
 SCHEMA = "mib-native-selector-census-v1"
-BOUND_SOURCE_PATHS = ("mib/forensics.py", "tools/native_selector_census.py")
+BOUND_SOURCE_PATHS = (
+    "mib/caseid.py",
+    "mib/forensics.py",
+    "tools/native_selector_census.py",
+)
 MAX_CASES_PER_INSPECTOR = 48
 INSPECTOR_TIMEOUT_SECS = 120
 
@@ -189,6 +193,7 @@ def _verify_producer_source(repo, source_root, producer_sha):
     if status.strip():
         raise ValueError("selector census producer repository is dirty")
     expected_live = {
+        "mib/caseid.py": Path(caseid.__file__).resolve(),
         "mib/forensics.py": Path(forensics.__file__).resolve(),
         "tools/native_selector_census.py": Path(__file__).resolve(),
     }
@@ -220,7 +225,7 @@ def build_census(input_dir, split, run_identity, effective_config,
     if split == "validation" and partition != "all":
         raise ValueError("validation selector census must use the full partition")
     input_dir = Path(input_dir).resolve(strict=True)
-    pdfs = sorted(input_dir.glob("*.pdf"))
+    pdfs = caseid.canonical_pdf_paths(input_dir)
     if partition != "all":
         want_holdout = partition == "holdout-md5"
         pdfs = [pdf for pdf in pdfs if _is_holdout(pdf.stem) == want_holdout]
