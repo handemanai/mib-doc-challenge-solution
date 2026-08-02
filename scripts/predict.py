@@ -55,6 +55,7 @@ RETRY_BUDGET_SECS = float(os.environ.get("MIB_RETRY_BUDGET_SECS", "1100"))
 RETRY_KILL_GRACE_SECS = float(os.environ.get("MIB_RETRY_KILL_GRACE_SECS", "5"))
 BATCH_LIMIT_SECS = float(os.environ.get("MIB_BATCH_LIMIT_SECS", "30000"))
 FINALIZE_RESERVE_SECS = float(os.environ.get("MIB_FINALIZE_RESERVE_SECS", "60"))
+WORKER_REAP_GRACE_SECS = 5.0
 
 # --- Batch-deadline governor -------------------------------------------------
 # The per-case SIGALRM (layer 1) and the heartbeat watchdog (layer 2) protect
@@ -272,10 +273,32 @@ class Shard:
                         pass  # torn tail line mid-write
         return done
 
-    def _respawn(self, reason):
+    def _respawn(self, reason, stop_deadline=None):
+        """Stop the old worker and resume its durable tail when time permits.
+
+        Return True only when the batch finalization boundary was reached while
+        stopping the worker.  Waiting after SIGKILL is bounded: an
+        uninterruptible child must not pin the supervisor forever.
+        """
         if self.proc.poll() is None:
-            self.proc.kill()
-            self.proc.wait()
+            try:
+                self.proc.kill()
+            except ProcessLookupError:
+                pass  # exited between poll and kill
+            wait_timeout = WORKER_REAP_GRACE_SECS
+            if stop_deadline is not None:
+                wait_timeout = min(
+                    wait_timeout,
+                    max(0.0, stop_deadline - time.monotonic()))
+            try:
+                self.proc.wait(timeout=wait_timeout)
+            except subprocess.TimeoutExpired:
+                print(f"[watchdog] shard{self.idx} {reason}; "
+                      "worker did not reap after SIGKILL; abandoning slice",
+                      flush=True)
+                self.finished = True
+                return (stop_deadline is not None
+                        and time.monotonic() >= stop_deadline)
         culprit = _read_heartbeat(self.hb)
         done = self._completed_ids()
         remaining = [p for p in self.pdfs
@@ -289,21 +312,66 @@ class Shard:
         self.no_progress = 0 if len(remaining) < len(self.pdfs) else self.no_progress + 1
         if not remaining or self.no_progress >= MAX_NO_PROGRESS_RESPAWNS:
             self.finished = True
-            return
+            return False
+        if stop_deadline is not None and time.monotonic() >= stop_deadline:
+            self.finished = True
+            return True
         self._spawn(remaining)
+        return False
 
-    def tick(self):
+    def tick(self, stop_deadline=None):
         if self.finished:
-            return
+            return False
         rc = self.proc.poll()
         if rc == 0:
             self.finished = True
+            return False
         elif rc == WORKER_RECYCLE_EXIT_CODE:
-            self._respawn("requested recognizer recycle")
+            return self._respawn(
+                "requested recognizer recycle", stop_deadline)
         elif rc is not None:
-            self._respawn(f"exited rc={rc}")
+            return self._respawn(f"exited rc={rc}", stop_deadline)
         elif self._silent_too_long():
-            self._respawn("heartbeat stale")
+            return self._respawn("heartbeat stale", stop_deadline)
+        return False
+
+    def stop(self):
+        """Signal this shard to stop without scheduling more work.
+
+        The batch-deadline path uses this before its final collection pass.  A
+        worker may be blocked below Python's signal layer, so graceful
+        termination is not a reliable boundary; SIGKILL is intentional here.
+        Reaping is a separate bounded phase so all workers receive SIGKILL
+        before one pathological wait can consume the grace period.  Return
+        whether a live worker had to be killed for truthful diagnostics.
+        """
+        if self.finished or self.proc is None:
+            self.finished = True
+            return False
+        was_live = self.proc.poll() is None
+        if was_live:
+            try:
+                self.proc.kill()
+            except ProcessLookupError:
+                pass  # exited between poll and kill
+        return was_live
+
+    def reap(self, deadline):
+        """Reap this shard within the shared shutdown deadline."""
+        if self.proc is None:
+            self.finished = True
+            return True
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            self.proc.wait(timeout=remaining)
+            reaped = True
+        except subprocess.TimeoutExpired:
+            # A task stuck in an uninterruptible kernel state may not reap even
+            # after SIGKILL.  Do not let that defeat the hard batch boundary;
+            # container teardown will remove any survivor after PID 1 exits.
+            reaped = False
+        self.finished = True
+        return reaped
 
 
 def _parse_args(argv):
@@ -565,6 +633,9 @@ def _publish_run_receipt(prepared):
         raise SystemExit(
             "cannot complete receipt with unexpected or missing run artifacts")
     payload = dict(payload)
+    # "completed" attests durable, complete artifacts, not that every OCR
+    # extraction succeeded. Per-case failures (including finalization-reserve
+    # backfills) remain explicit in the evidence artifact bound below.
     payload["terminal_status"] = "completed"
     payload["artifacts"] = {
         name: {
@@ -603,7 +674,8 @@ def _state_stem(state):
     return stem or state["case_id"]
 
 
-def _collect_states(shards, pdfs, complete):
+def _collect_states(shards, pdfs, complete,
+                    missing_category="missing_primary_state"):
     """Dedup-merge shard state files; with complete=True, backfill a
     conservative stub for every PDF that has no state row yet.
 
@@ -631,12 +703,12 @@ def _collect_states(shards, pdfs, complete):
                     "case_id_provenance": {"stem": cid,
                                            "source": "backfill_stub"},
                     "mean_ocr_conf": 0.0, "injection": {},
-                    "error": "missing_primary_state",
+                    "error": missing_category,
                     "extraction": {
                         "attempt_count": 1, "recovered": False,
                         "attempts": [{"attempt": 1, "status": "failed",
                                       "failure_category":
-                                      "missing_primary_state"}]}}
+                                      missing_category}]}}
     # Reconstruct the exact order a clean run emits: each shard's sorted input
     # slice in shard order. Missing/backfilled cases therefore return to their
     # clean slot instead of being appended after all successful states.
@@ -970,18 +1042,65 @@ def main():
     governor = _Governor(tmp, len(pdfs), batch_started,
                          enabled=os.environ.get("MIB_GOVERNOR", "1") == "1")
     counter = _CompletionCounter(shards)
+    # Enter finalization with an explicit reserve instead of relying on the
+    # external evaluator to hard-kill an over-budget container.  Normal runs do
+    # not enter this branch, so their scheduling and emitted bytes are
+    # unchanged.  On a slow/pathological batch, durable states survive and all
+    # unfinished cases become conservative, validator-safe rows.
+    finalize_at = batch_started + BATCH_LIMIT_SECS - FINALIZE_RESERVE_SECS
+    batch_deadline_reached = False
     while not all(s.finished for s in shards):
-        time.sleep(POLL_SECS)
+        remaining = finalize_at - time.monotonic()
+        if remaining <= 0:
+            # A worker can exit just before the boundary but before the prior
+            # tick observed it.  Accept only clean exits here; recycle/crash
+            # exits still need unfinished-tail backfill.
+            for shard in shards:
+                if not shard.finished and shard.proc is not None \
+                        and shard.proc.poll() == 0:
+                    shard.finished = True
+            if all(s.finished for s in shards):
+                break
+            batch_deadline_reached = True
+            break
+        time.sleep(min(POLL_SECS, remaining))
+        if time.monotonic() >= finalize_at:
+            for shard in shards:
+                if not shard.finished and shard.proc is not None \
+                        and shard.proc.poll() == 0:
+                    shard.finished = True
+            if all(s.finished for s in shards):
+                break
+            batch_deadline_reached = True
+            break
         for s in shards:
-            s.tick()
+            if s.tick(finalize_at):
+                batch_deadline_reached = True
+                break
+        if batch_deadline_reached:
+            break
         governor.update(counter.poll())
         if time.time() - last_flush >= FLUSH_SECS:
             interim = _collect_states(shards, pdfs, complete=True)
             _checkpoint_predictions(interim, out)
             last_flush = time.time()
 
-    states = _collect_states(shards, pdfs, complete=True)
-    states = _retry_failed_states(states, pdfs, tmp, batch_started)
+    if batch_deadline_reached:
+        terminated = sum(shard.stop() for shard in shards)
+        reap_deadline = time.monotonic() + WORKER_REAP_GRACE_SECS
+        unreaped = sum(not shard.reap(reap_deadline) for shard in shards)
+        completed = len(_collect_states(shards, pdfs, complete=False))
+        states = _collect_states(
+            shards, pdfs, complete=True,
+            missing_category="batch_finalization_reserve_entered")
+        _retry_log(
+            f"[batch-deadline] finalization reserve entered; "
+            f"terminated_workers={terminated} unreaped_workers={unreaped} "
+            f"completed={completed}/{len(pdfs)} "
+            f"backfilled={len(states) - completed} retries=skipped")
+    else:
+        states = _collect_states(shards, pdfs, complete=True)
+        states = _retry_failed_states(states, pdfs, tmp, batch_started)
 
     (epoch, batch_revoked, native_epoch, native_revoked,
      ablation) = _batch_decision_inputs(states)
