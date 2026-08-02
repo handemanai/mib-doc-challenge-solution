@@ -513,7 +513,17 @@ def parse_page(lines):
             fuzzy = (not exact and len(norm) > len(prefix) and
                      _fuzzy_prefix(prefix, norm))
             if exact or fuzzy:
-                raw_seg = re.split(r"[:.]", text, 1)[-1]
+                # When OCR loses the separator, re-sending the recognized
+                # label to the value snap can change the winner (the letters
+                # in "status" bias a short fee tail toward "unpaid").  An
+                # exact fee-label match authorizes consuming only that known
+                # leading label; fuzzy labels keep the ordinary conservative
+                # path.
+                if exact and field == "fee_status":
+                    raw_seg = re.sub(r"(?i)^\s*fee[\s.]*status", "", text,
+                                     count=1).lstrip(" .:|'")
+                else:
+                    raw_seg = re.split(r"[:.]", text, 1)[-1]
                 value, score = _snap_value(field, raw_seg)
                 if value and (field not in fields or score > fields[field][1]):
                     fields[field] = (value, score if exact else score - 5, raw_seg.strip())

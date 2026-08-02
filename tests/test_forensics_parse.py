@@ -107,6 +107,34 @@ def test_name_label_bleed_stripped():
     assert val == "Nexdane Solvoss"
 
 
+def test_exact_fee_label_without_separator_snaps_only_value_tail():
+    # Public-train MIB-000090 is the sole accepted exact-label/no-delimiter
+    # candidate in the frozen parser census.  Consuming the recognized label
+    # keeps its damaged `c paid` tail correctly classified as paid.
+    ptype, fields, _ = parse_ocr.parse_page(_lines(
+        "MIB Fee Receipt", "Fee Statusc paid"))
+    assert ptype == "fee_receipt"
+    assert fields["fee_status"][0] == "paid"
+    assert fields["fee_status"][2] == "c paid"
+
+
+def test_exact_fee_label_without_separator_preserves_unpaid():
+    _, fields, _ = parse_ocr.parse_page(_lines(
+        "MIB Fee Receipt", "Fee Statusunpaid"))
+    assert fields["fee_status"][0] == "unpaid"
+    assert fields["fee_status"][2] == "unpaid"
+
+
+def test_exact_fee_label_does_not_bias_damaged_paid_tail_toward_unpaid():
+    # A synthetic duplicated leading letter is still far closer to `paid` once
+    # the already-recognized label is consumed.  Re-snapping the whole line
+    # would let letters in `status` manufacture the denial value `unpaid`.
+    _, fields, _ = parse_ocr.parse_page(_lines(
+        "MIB Fee Receipt", "Fee Status pnaid"))
+    assert fields["fee_status"][0] == "paid"
+    assert fields["fee_status"][2] == "pnaid"
+
+
 def test_watermark_regex_matches_ocr_variants():
     for wm in ["SAMPLE DENIAL", "sampledenial", "SDENIALA!"]:
         assert parse_ocr.WATERMARK_RE.search(wm), wm
