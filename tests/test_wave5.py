@@ -4,10 +4,11 @@ signature, unicode sanitization, damaged-label note verdicts."""
 import fitz
 import pytest
 
-from mib import extract, parse_ocr, rules
+from mib import extract, parse_ocr, pipeline, rules, two_ledger
 from mib.forensics import (classify_spans, sanitize_text, struck_value_sets,
                            struck_values)
 from mib.pipeline import (FALLBACKS, TEXT_SOURCE_RANK,
+                          _build_baseline_batch_context,
                           _composited_rank1_attestation,
                           _rank1_strike_alias_attestation,
                           _retained_baseline_context_candidate,
@@ -1085,6 +1086,75 @@ def test_conflicting_signed_rank1_context_omits_field(
     assert _retained_baseline_context_candidate(field, [[
         signed_values[0], "adjudicator_note", 1, ordinary_confidence,
         signed_values[0]]], signed_values) is None
+
+
+def test_baseline_batch_context_builder_binds_signed_and_ordinary_inputs():
+    pools = {
+        "arrival_date": [[
+            "2026-05-01", "intake", 2, 95.0, "2026-05-01"]],
+        "sponsor_id": [[
+            "SPN-1234", "intake", 3, 95.0, "SPN-1234"]],
+        "visa_class": [[
+            "XW-1", "intake", 2, 95.0, "XW-1"]],
+    }
+    context = _build_baseline_batch_context(
+        pools, _composited_values(sponsor_id="SPN-5678"))
+    assert context == {
+        "arrival_date": [[
+            "2026-05-01", "intake", 2, 95.0, "2026-05-01"]],
+        "sponsor_id": [[
+            "SPN-5678", "manual_correction", 1, 99.0, "SPN-5678"]],
+        "visa_class": [[
+            "XW-1", "intake", 3, 95.0, "XW-1"]],
+    }
+
+
+def test_baseline_batch_context_projects_struck_signed_correction():
+    pools = {"visa_class": [
+        ["XW-1", "intake", 2, 95.0, "XW-1"],
+        ["DIP-1", "manual_correction", 1, 99.0, "DIP-1"],
+    ]}
+    payload = _composited_values(visa_class="DIP-1")
+    context = _build_baseline_batch_context(
+        pools, payload,
+        doc_notes={"corrections": {"visa_class": "DIP-1"}},
+        struck_authority_values=["DIP-1"])
+    assert context == {"visa_class": [[
+        "XW-1", "intake", 3, 95.0, "XW-1"]]}
+
+
+def test_baseline_batch_context_keeps_raw_struck_arrival_for_epoch():
+    arrival = ["2026-05-01", "intake", 2, 95.0, "2026-05-01"]
+    context = _build_baseline_batch_context(
+        {"arrival_date": [arrival]}, {}, struck_values=["2026-05-01"])
+    assert context == {"arrival_date": [arrival]}
+
+
+def test_baseline_batch_context_builder_omits_conflicting_signed_field():
+    pools = {"visa_class": [[
+        "XW-1", "intake", 2, 95.0, "XW-1"]]}
+    payload = _composited_values(visa_class="DIP-1")
+    payload["values"]["visa_class"].append("XW-1")
+    payload["values"]["visa_class"].sort()
+    payload["evidence"]["visa_class"].append({
+        "value": "XW-1",
+        "origin": {"page": 0, "view": "masked_pdf_render",
+                   "dpi": 150, "pass": "fast"},
+    })
+    payload["conflicts"] = ["visa_class"]
+    assert _build_baseline_batch_context(pools, payload) == {}
+
+
+def test_native_abstention_publishes_context_without_changing_baseline():
+    state = _approval_state()
+    state["_baseline_batch_context"] = {"sponsor_id": [[
+        "SPN-1234", "intake", 3, 95.0, "SPN-1234"]]}
+    prediction, detail = two_ledger.decide_case(
+        state, pipeline.MINED_EPOCH, pipeline.MINED_EPOCH,
+        frozenset(), frozenset(), "full")
+    assert prediction["adjudication"] == "APPROVED"
+    assert detail["baseline_batch_context"] == (
+        state["_baseline_batch_context"])
 
 
 def test_native_batch_sponsor_union_cannot_drop_composited_frequency():

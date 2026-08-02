@@ -361,6 +361,8 @@ def build_native_ledger(doc, case_id, baseline_aux=None):
     return {
         "case_id": case_id,
         "ledger_kind": "native",
+        "baseline_batch_context": baseline_aux.get(
+            "baseline_batch_context", {}),
         "pix_fired": [],
         "pools": pools,
         "doc_notes": doc_notes,

@@ -1015,6 +1015,84 @@ def _retained_baseline_context_candidate(field, candidates, signed_values):
     return None if ambiguous else list(selected)
 
 
+def _build_baseline_batch_context(
+        pools, composited_payload, *, doc_notes=None, struck_values=(),
+        struck_authority_values=None, rank1_strike_aliases=()):
+    """Build the strike-sanitized P0-B context that constrains native batch rules.
+
+    Arrival dates remain the complete ordinary P0-B pool because the epoch is
+    a distribution statistic. Sponsor and visa retain one unambiguous P0-B
+    winner, except that one surviving signed correction is the historical
+    rank-1 override and a signed conflict retains no winner. The snapshot is
+    built before additive pixel/ROI channels, so those channels cannot rewrite
+    the independent counterfactual.
+    """
+    pools = pools if isinstance(pools, dict) else {}
+    payload = composited_payload if isinstance(composited_payload, dict) else {}
+    global_struck = set(struck_values or ())
+    authority_struck = set(
+        global_struck if struck_authority_values is None
+        else struck_authority_values or ())
+    scratch = {
+        "pools": pools,
+        "struck_values": sorted(global_struck),
+        "struck_authority_values": sorted(authority_struck),
+        "rank1_strike_aliases": list(rank1_strike_aliases or ()),
+    }
+    strike_taints = _state_strike_taints(scratch)
+    _, sanitized_payload, integrity_error = _sanitize_rank1_strikes(
+        doc_notes or {}, payload, authority_struck, strike_taints)
+    values = sanitized_payload.get("values", {}) \
+        if not integrity_error and isinstance(sanitized_payload, dict) else {}
+    values = values if isinstance(values, dict) else {}
+
+    filtered = {}
+    for field, candidates in pools.items():
+        if not isinstance(candidates, list):
+            continue
+        kept = []
+        for candidate in candidates:
+            if (not isinstance(candidate, (list, tuple))
+                    or len(candidate) < 5):
+                continue
+            if (_candidate_is_struck(candidate, global_struck)
+                    or (_candidate_is_rank1(candidate)
+                        and _candidate_is_struck(
+                            candidate, authority_struck))
+                    or _value_is_tainted(
+                        field, candidate[0], strike_taints)):
+                continue
+            kept.append(list(candidate))
+        if kept:
+            filtered[field] = kept
+
+    context = {}
+    # Epoch drift is deliberately two-sided over the complete ordinary P0-B
+    # arrival distribution. Preserve that raw pre-additive pool even when a
+    # visible strike later removes a date from per-case selection; only the
+    # sponsor/visa counterfactual authority below is strike-sanitized.
+    arrival = pools.get("arrival_date", [])
+    if isinstance(arrival, list):
+        retained_arrival = [
+            list(candidate) for candidate in arrival
+            if isinstance(candidate, (list, tuple)) and len(candidate) >= 5
+        ]
+        if retained_arrival:
+            context["arrival_date"] = retained_arrival
+    for field in ("sponsor_id", "visa_class"):
+        signed_values = values.get(field, [])
+        signed_values = signed_values if isinstance(
+            signed_values, list) else []
+        try:
+            retained = _retained_baseline_context_candidate(
+                field, filtered.get(field, []), signed_values)
+        except (IndexError, KeyError, TypeError, ValueError):
+            retained = None
+        if retained is not None:
+            context[field] = [retained]
+    return context
+
+
 def _value_is_struck(value, struck_values):
     """Exact shipped cancellation predicate, shared by both evidence views."""
     struck = {str(value).lower() for value in struck_values}
@@ -1691,6 +1769,11 @@ def _extract_state_from_document(pdf_path, doc, raw_pdf):
     """
     state, baseline_aux = _extract_baseline_state(pdf_path, doc, raw_pdf)
     if os.environ.get("MIB_NATIVE_SCAN_OCR", "1") == "1":
+        # Private/audit-only on the baseline state: the frozen baseline
+        # selection and batch behavior never consume this key. The same bytes
+        # are copied into the native ledger below and published in final detail.
+        state["_baseline_batch_context"] = baseline_aux.get(
+            "baseline_batch_context", {})
         from . import native_ledger
         native = native_ledger.build_native_ledger(
             doc, state["case_id"], baseline_aux)
@@ -1947,6 +2030,15 @@ def _extract_baseline_state(pdf_path, doc, raw_pdf):
     for field, cands in ocr_candidates.items():
         pools.setdefault(field, []).extend([list(c) for c in cands])
 
+    # Freeze and sanitize the ordinary P0-B counterfactual before additive
+    # pixel/ROI recovery can extend the pools. It constrains only the native
+    # ledger; the baseline decision remains byte-equivalent to default-off.
+    baseline_batch_context = _build_baseline_batch_context(
+        pools, composited_rank1_payload, doc_notes=doc_notes,
+        struck_values=struck_values,
+        struck_authority_values=struck_authority_values,
+        rank1_strike_aliases=rank1_strike_aliases)
+
     # Pixel-decoder channel (mib/pixmatch.py): closed-vocabulary template
     # reads for fields still missing or weak after OCR parsing. Additive only
     # — a channel failure must never cost a case its OCR reads. native_view is
@@ -2106,6 +2198,7 @@ def _extract_baseline_state(pdf_path, doc, raw_pdf):
     baseline_aux = {
         "page_rot": {int(k): int(v) for k, v in page_rot.items()},
         "missing_deny": missing_deny,
+        "baseline_batch_context": baseline_batch_context,
         "page_reads": {
             page_number: {
                 "type": info["type"],
@@ -2200,7 +2293,7 @@ def _pixmatch_stage(doc, hidden, pools, doc_notes, page_types,
     for page_number, image in pixmatch.scan_images(doc, **scan_kwargs):
         deskewed, angle = pixmatch.deskew(image)
         context = contexts.get(int(page_number), {
-            "source": "p0b_masked_scan_image", "dpi": 72.0})
+            "source": "p0b_viewer_consistent_scan_image", "dpi": 72.0})
         _observe_image_view(
             view_registry, image=deskewed, page=int(page_number),
             consumer="candidate_pixmatch", pass_name="decode",
@@ -2266,23 +2359,21 @@ def _p0b_pixmatch_approval_guards(doc, hidden, page_types,
     images = []
     for page_number, image in pixmatch._p0b_scan_images(doc, hidden):
         dpi = pixmatch._image_dpi(doc, page_number, image)
-        masked = any(
-            getattr(span, "page", None) == int(page_number)
-            for span in hidden or ())
-        preprocess = ("grayscale_despeckle_hidden_mask" if masked
-                      else "grayscale_despeckle")
         contexts[int(page_number)] = {
-            "source": "p0b_masked_scan_image", "dpi": dpi}
+            "source": "p0b_viewer_consistent_scan_image", "dpi": dpi}
         _observe_image_view(
             view_registry, image=image, page=int(page_number),
             consumer="baseline_pixmatch", pass_name="decode",
-            transform="p0b_scan_output", source="p0b_masked_scan_image",
-            dpi=dpi, rotation_degrees=0.0, preprocess=preprocess)
+            transform="p0b_scan_output",
+            source="p0b_viewer_consistent_scan_image",
+            dpi=dpi, rotation_degrees=0.0,
+            preprocess="grayscale_despeckle")
         deskewed, angle = pixmatch.deskew(image)
         _observe_image_view(
             view_registry, image=deskewed, page=int(page_number),
             consumer="baseline_pixmatch", pass_name="decode",
-            transform="deskewed", source="p0b_masked_scan_image",
+            transform="deskewed",
+            source="p0b_viewer_consistent_scan_image",
             dpi=dpi, rotation_degrees=float(angle), preprocess="deskew")
         images.append((page_number, deskewed))
     if not images:

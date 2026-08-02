@@ -181,10 +181,10 @@ def _candidate_pixmatch_evidence(native=False):
         events = [
             _view_event(
                 0, "candidate_pixmatch", "decode", "p0b_scan_output",
-                "p0b_masked_scan_image", "grayscale_despeckle"),
+                "p0b_viewer_consistent_scan_image", "grayscale_despeckle"),
             _view_event(
                 1, "candidate_pixmatch", "decode", "deskewed",
-                "p0b_masked_scan_image", "deskew", rotation=1.25),
+                "p0b_viewer_consistent_scan_image", "deskew", rotation=1.25),
             _view_event(
                 2, "candidate_pixmatch", field, "accepted_roi",
                 "deskewed_pixmatch_view", "roi", shape=(3, 5)),
@@ -216,10 +216,10 @@ def _baseline_pixmatch_evidence():
     row["image_view_registry"]["pages"] = [{"page": 0, "events": [
         _view_event(
             0, "baseline_pixmatch", "decode", "p0b_scan_output",
-            "p0b_masked_scan_image", "grayscale_despeckle"),
+            "p0b_viewer_consistent_scan_image", "grayscale_despeckle"),
         _view_event(
             1, "baseline_pixmatch", "decode", "deskewed",
-            "p0b_masked_scan_image", "deskew", digest="0" * 64),
+            "p0b_viewer_consistent_scan_image", "deskew", digest="0" * 64),
         _view_event(
             2, "baseline_pixmatch", field, "accepted_roi",
             "deskewed_pixmatch_view", "roi", shape=(3, 5)),
@@ -243,11 +243,23 @@ def _baseline_pixmatch_evidence():
 def test_pixmatch_view_registry_and_acceptance_contracts_validate():
     _validate_evidence_rows([_candidate_pixmatch_evidence()], NATIVE_OFF)
     _validate_evidence_rows(
+        [_candidate_pixmatch_evidence()],
+        {"MIB_NATIVE_SCAN_OCR": "1"})
+    _validate_evidence_rows(
         [_candidate_pixmatch_evidence(native=True)],
         {"MIB_NATIVE_SCAN_OCR": "1"})
     _validate_evidence_rows(
         [_baseline_pixmatch_evidence()],
         {"MIB_NATIVE_SCAN_OCR": "1"})
+
+
+def test_legacy_masked_pixmatch_source_is_not_viewer_consistent():
+    row = _candidate_pixmatch_evidence()
+    for event in row["image_view_registry"]["pages"][0]["events"][:2]:
+        event["source"] = "p0b_masked_scan_image"
+    with pytest.raises(ValueError, match="pixmatch event contract"):
+        _validate_evidence_rows(
+            [row], {"MIB_NATIVE_SCAN_OCR": "1"})
 
 
 def test_native_sanitizer_abstention_may_leave_only_decoded_fingerprint():
@@ -1047,10 +1059,10 @@ def test_binding_canonicalizes_config_and_rejects_output_or_input_drift(tmp_path
     assert binding["effective_config"]["MIB_NATIVE_SCAN_OCR"] == "1"
     assert binding["effective_config"]["MIB_MAX_RETRY_CASES"] == "128"
     assert binding["effective_config"]["MIB_CASE_TIMEOUT"] == "120"
-    assert binding["effective_config"]["MIB_RETRY_CASE_TIMEOUT"] == "130"
-    assert binding["effective_config"]["MIB_RETRY_BUDGET_SECS"] == "1100"
+    assert binding["effective_config"]["MIB_RETRY_CASE_TIMEOUT"] == "240"
+    assert binding["effective_config"]["MIB_RETRY_BUDGET_SECS"] == "3600"
     assert binding["effective_config"]["MIB_STUCK_SECS"] == "150"
-    assert EFFECTIVE_CONFIG_DEFAULTS["MIB_RETRY_BUDGET_SECS"] == "1100"
+    assert EFFECTIVE_CONFIG_DEFAULTS["MIB_RETRY_BUDGET_SECS"] == "3600"
     assert binding["run_split"] == "dev"
     assert len(binding["run_nonce"]) == 64
     assert binding["image_inspect_sha256"] == binding["image_inspect"]["sha256"]

@@ -140,13 +140,13 @@ def test_warmup_scales_down_for_small_batches(tmp_path):
 
 def test_small_batch_target_keeps_a_workable_floor(tmp_path):
     # Fixed retry/finalize reserves must not swallow a small batch's budget:
-    # 200 cases x 6s = 1200s budget; 0.9x - 1160 would be ~-80s. The floor
+    # 200 cases x 6s = 1200s budget; 0.9x - 3660 would be negative. The floor
     # keeps the target proportional so tiny batches are not over-degraded.
     gov = _governor(tmp_path, total=200)
     assert gov.target == pytest.approx(200 * 6.0 * 0.7)
     big = _governor(tmp_path, total=5000)
     assert big.target == pytest.approx(
-        min(30000.0, 5000 * 6.0) * 0.9 - 1100.0 - 60.0)
+        min(30000.0, 5000 * 6.0) * 0.9 - 3600.0 - 60.0)
 
 
 def test_disabled_governor_never_publishes(tmp_path):

@@ -55,8 +55,17 @@ MAX_NO_PROGRESS_RESPAWNS = 3
 # document run; RETRY_BUDGET_SECS and the batch-minus-finalize deadline below
 # remain the independent hard wall-clock bounds.
 MAX_RETRY_CASES = int(os.environ.get("MIB_MAX_RETRY_CASES", "128"))
-RETRY_CASE_TIMEOUT = float(os.environ.get("MIB_RETRY_CASE_TIMEOUT", "130"))
-RETRY_BUDGET_SECS = float(os.environ.get("MIB_RETRY_BUDGET_SECS", "1100"))
+# A fresh retry may pay a second model/session startup and can legitimately run
+# longer than the in-worker 120-second alarm on a complex packet. Keep a hard
+# process-group kill, but allow twice the primary case window before declaring
+# the only recovery attempt terminally failed.
+RETRY_CASE_TIMEOUT = float(os.environ.get("MIB_RETRY_CASE_TIMEOUT", "240"))
+# One hour covers the full defensive candidate ceiling at the observed
+# fresh-process recovery pace with substantial burst/timeout margin. This is
+# still only a preferred retry reserve: the absolute batch-minus-finalization
+# deadline below always wins, so retries can never consume the hard final write
+# window or exceed the official 30,000-second container limit.
+RETRY_BUDGET_SECS = float(os.environ.get("MIB_RETRY_BUDGET_SECS", "3600"))
 RETRY_KILL_GRACE_SECS = float(os.environ.get("MIB_RETRY_KILL_GRACE_SECS", "5"))
 BATCH_LIMIT_SECS = float(os.environ.get("MIB_BATCH_LIMIT_SECS", "30000"))
 FINALIZE_RESERVE_SECS = float(os.environ.get("MIB_FINALIZE_RESERVE_SECS", "60"))
@@ -461,8 +470,8 @@ def _effective_run_config():
         "MIB_DISABLE_EXTRACTION_RETRY": "0",
         "MIB_WORKER_MAX_CASES": "48",
         "MIB_MAX_RETRY_CASES": "128",
-        "MIB_RETRY_CASE_TIMEOUT": "130",
-        "MIB_RETRY_BUDGET_SECS": "1100",
+        "MIB_RETRY_CASE_TIMEOUT": "240",
+        "MIB_RETRY_BUDGET_SECS": "3600",
         "MIB_RETRY_KILL_GRACE_SECS": "5",
         "MIB_BATCH_LIMIT_SECS": "30000",
         "MIB_FINALIZE_RESERVE_SECS": "60",

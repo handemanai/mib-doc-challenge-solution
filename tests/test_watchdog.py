@@ -157,8 +157,8 @@ def test_campaign_timeout_defaults_are_synchronized(monkeypatch):
     assert RUN_SHARD_MODULE.MAX_CASES_PER_WORKER == 48
     assert RUN_SHARD_MODULE.RECYCLE_EXIT_CODE == 75
     assert PREDICT_MODULE.MAX_RETRY_CASES == 128
-    assert PREDICT_MODULE.RETRY_CASE_TIMEOUT == 130
-    assert PREDICT_MODULE.RETRY_BUDGET_SECS == 1100
+    assert PREDICT_MODULE.RETRY_CASE_TIMEOUT == 240
+    assert PREDICT_MODULE.RETRY_BUDGET_SECS == 3600
     assert PREDICT_MODULE.STUCK_SECS == 150
     assert PREDICT_MODULE.WORKER_RECYCLE_EXIT_CODE == 75
     # Candidate count handles plausible transient bursts.  It intentionally
@@ -650,6 +650,62 @@ def test_retry_wall_deadline_stops_candidates_and_preserves_fallback(
         "attempt": 2, "status": "not_attempted",
         "failure_category": "retry_budget_exhausted"}
         for state in result[5:])
+
+
+def test_default_retry_wall_attempts_full_candidate_ceiling_at_burst_pace(
+        monkeypatch, tmp_path):
+    """The wall, not just the count cap, covers a realistic 128-case burst."""
+    count = PREDICT_MODULE.MAX_RETRY_CASES
+    pdfs = []
+    states = []
+    for i in range(count):
+        cid = f"MIB-{830000 + i:06d}"
+        pdf = tmp_path / f"{cid}.pdf"
+        pdf.write_bytes(b"retry fixture")
+        pdfs.append(str(pdf))
+        states.append({"case_id": cid, "pools": {}, "doc_notes": {},
+                       "error": "worker exited"})
+
+    now = [0.0]
+    launched = []
+
+    def burst_worker(command, env, timeout):
+        launched.append(timeout)
+        # Model a 20-second fresh-process recovery, except one full per-case
+        # timeout. Even this complete 128-candidate burst remains comfortably
+        # inside the default one-hour wall.
+        if len(launched) == count // 2:
+            now[0] += PREDICT_MODULE.RETRY_CASE_TIMEOUT
+            raise subprocess.TimeoutExpired(command, timeout)
+        now[0] += 20.0
+        return 0
+
+    def recovered_state(path, cid):
+        return {"case_id": cid, "pools": {"passport": [cid]},
+                "doc_notes": {}, "extraction": {
+                    "attempt_count": 1, "recovered": False,
+                    "attempts": [{"attempt": 2, "status": "success"}]}}
+
+    monkeypatch.setattr(PREDICT_MODULE.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(PREDICT_MODULE, "BATCH_LIMIT_SECS", 30000.0)
+    monkeypatch.setattr(PREDICT_MODULE, "FINALIZE_RESERVE_SECS", 60.0)
+    monkeypatch.setattr(PREDICT_MODULE, "_run_retry_worker", burst_worker)
+    monkeypatch.setattr(PREDICT_MODULE, "_read_retry_state", recovered_state)
+
+    result = PREDICT_MODULE._retry_failed_states(
+        states, pdfs, tmp_path, batch_started=0.0)
+
+    assert len(launched) == count
+    assert now[0] == (count - 1) * 20.0 + \
+        PREDICT_MODULE.RETRY_CASE_TIMEOUT
+    assert sum(state["extraction"]["recovered"] is True
+               for state in result) == count - 1
+    assert sum(state["extraction"]["attempts"][-1].get(
+        "failure_category") == "retry_process_timeout"
+        for state in result) == 1
+    assert all(state["extraction"]["attempts"][-1].get(
+        "failure_category") != "retry_budget_exhausted"
+        for state in result)
 
 
 def test_retry_candidates_follow_original_pdf_order():

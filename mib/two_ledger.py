@@ -306,6 +306,13 @@ def decide_case(state, base_epoch, native_epoch, base_revoked, native_revoked,
     from .pipeline import decide
 
     base_pred, base_detail = decide(state, base_epoch, batch_revoked=base_revoked)
+    if ablation:
+        # The baseline result stays frozen, but the evidence row must attest
+        # the exact sanitized P0-B counterfactual supplied to the native ledger.
+        # Publish it even when native extraction fully abstained.
+        base_detail = dict(base_detail)
+        base_detail["baseline_batch_context"] = copy.deepcopy(
+            state.get("_baseline_batch_context", {}))
     native = state.get("native_ledger")
     if not ablation or native is None:
         return enforce_final_consistency(base_pred, base_detail, base_epoch)

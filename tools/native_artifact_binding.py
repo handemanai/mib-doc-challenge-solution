@@ -233,8 +233,8 @@ EFFECTIVE_CONFIG_DEFAULTS = {
     "MIB_DISABLE_EXTRACTION_RETRY": "0",
     "MIB_WORKER_MAX_CASES": "48",
     "MIB_MAX_RETRY_CASES": "128",
-    "MIB_RETRY_CASE_TIMEOUT": "130",
-    "MIB_RETRY_BUDGET_SECS": "1100",
+    "MIB_RETRY_CASE_TIMEOUT": "240",
+    "MIB_RETRY_BUDGET_SECS": "3600",
     "MIB_RETRY_KILL_GRACE_SECS": "5",
     "MIB_BATCH_LIMIT_SECS": "30000",
     "MIB_FINALIZE_RESERVE_SECS": "60",
@@ -738,7 +738,17 @@ def _validate_view_event_contract(event, effective_config):
     if not pixmatch_enabled or (consumer == "baseline_pixmatch"
                                 and not native_enabled):
         raise ValueError("image view pixmatch consumer is disabled")
-    if consumer == "candidate_pixmatch" and native_enabled:
+    # Candidate pixmatch belongs to the P0-B baseline when the two-ledger
+    # runtime explicitly selects that view, even while native OCR is enabled.
+    # The dormant native pixmatch contract remains source-bound for historical
+    # tooling; the two families may not mix in the chain check below.
+    native_pixmatch_event = (
+        consumer == "candidate_pixmatch" and native_enabled
+        and (source in {"native_embedded_image", "native_full_page_image"}
+             or transform in {"native_decoded", "footer_sanitized",
+                              "native_scan_output", "despeckled"})
+    )
+    if native_pixmatch_event:
         contracts = {
             "native_decoded": (
                 "decode", "native_embedded_image", {"decode_grayscale"}),
@@ -757,11 +767,10 @@ def _validate_view_event_contract(event, effective_config):
     else:
         contracts = {
             "p0b_scan_output": (
-                "decode", "p0b_masked_scan_image",
-                {"grayscale_despeckle",
-                 "grayscale_despeckle_hidden_mask"}),
+                "decode", "p0b_viewer_consistent_scan_image",
+                {"grayscale_despeckle"}),
             "deskewed": (
-                "decode", "p0b_masked_scan_image", {"deskew"}),
+                "decode", "p0b_viewer_consistent_scan_image", {"deskew"}),
             "accepted_roi": (
                 None, "deskewed_pixmatch_view", {"roi"}),
         }
@@ -911,7 +920,10 @@ def _validate_image_view_registry(registry, effective_config,
                     if event["transform"] != "accepted_roi"]
             transforms = [event["transform"] for event in core]
             all_transforms = [event["transform"] for event in events]
-            if consumer == "candidate_pixmatch" and native_enabled:
+            native_chain = (
+                consumer == "candidate_pixmatch" and native_enabled
+                and transforms and transforms[0] == "native_decoded")
+            if native_chain:
                 full = ["native_decoded", "footer_sanitized",
                         "native_scan_output", "despeckled", "deskewed"]
                 if transforms not in (["native_decoded"], full):
