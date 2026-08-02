@@ -64,13 +64,16 @@ def rebuild_state(s):
     out["doc_notes"] = doc_notes
     out["page_types"] = [pt for pt, _, _ in per_page]
     out["hidden_field_mentions"] = _hidden_field_mentions(s.get("hidden_texts", []))
-    if "struck_values" not in out:
+    if ("struck_values" not in out
+            or "struck_authority_values" not in out):
         pdf = CHALLENGE / "data" / "train" / f"{case_id}.pdf"
         if pdf.exists():
             with fitz.open(pdf) as doc:
                 visible, _ = forensics.classify_spans(doc)
-                out["struck_values"] = sorted(
-                    forensics.struck_values(doc, visible))
+                global_values, authority_values = \
+                    forensics.struck_value_sets(doc, visible)
+                out["struck_values"] = sorted(global_values)
+                out["struck_authority_values"] = sorted(authority_values)
     return out
 
 

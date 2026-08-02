@@ -326,7 +326,10 @@ def build_native_ledger(doc, case_id, baseline_aux=None):
     pipeline._merge_rank1_authority(
         ocr_candidates, doc_notes, [], _active_notes())
 
-    struck_values = sorted(forensics.struck_values(doc, visible))
+    struck_values, struck_authority_values = forensics.struck_value_sets(
+        doc, visible)
+    struck_values = sorted(struck_values)
+    struck_authority_values = sorted(struck_authority_values)
     composited_rank1_payload = pipeline._composited_rank1_attestation(
         _active_notes())
 
@@ -375,6 +378,7 @@ def build_native_ledger(doc, case_id, baseline_aux=None):
             "by_page": page_provenance,
         },
         "struck_values": struck_values,
+        "struck_authority_values": struck_authority_values,
         # Container forensics are document-level (identical to the baseline's)
         # and never feed a decision or calibration feature; the native decide
         # reads its own pools, so an empty container keeps this ledger cheap.

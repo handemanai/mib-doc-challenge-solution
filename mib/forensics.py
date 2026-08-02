@@ -2270,32 +2270,34 @@ def _strike_tokens(text):
             _STRIKE_TOKEN_RE.findall(sanitize_text(str(text)))]
 
 
-def struck_values(doc, visible_spans):
-    """Return viewer-visible tokens cancelled by visible vector strikes.
+def struck_value_sets(doc, visible_spans):
+    """Return global-cancellation and local-authority strike token sets.
 
     ``get_text('words')`` exposes hidden and clipped text, so raw word geometry
     is never authority by itself. Every word must bind unambiguously to the
     frozen viewer-trusted span inventory on the same page. The strike itself
     must be a visible, solid, colored line with sequence-bound path geometry.
-    If any occurrence of a token remains visibly unstruck, the document-global
-    cancellation representation cannot express locality safely and the token
-    is retained everywhere.
+    If any occurrence of a token remains visibly unstruck, the first returned
+    set omits it because document-global ordinary-pool cancellation cannot
+    express locality safely. The second set retains every locally struck token
+    so a crossed-out signed finding or correction cannot regain authority merely
+    because an unstruck duplicate appears elsewhere.
 
     Any malformed or ambiguous PDF metadata fails closed by returning no
     cancellation evidence.
     """
     try:
         if not isinstance(visible_spans, (list, tuple)):
-            return set()
+            return set(), set()
         trusted_by_page = {}
         visible_counts = {}
         for span in visible_spans:
             if not isinstance(span, Span) or span.hidden:
-                return set()
+                return set(), set()
             rect = fitz.Rect(span.bbox)
             if (not np.isfinite([*span.bbox]).all()
                     or rect.width <= 0 or rect.height <= 0):
-                return set()
+                return set(), set()
             tokens = _strike_tokens(span.text)
             trusted_by_page.setdefault(span.page, []).append(
                 (span, rect, tokens))
@@ -2314,7 +2316,7 @@ def struck_values(doc, visible_spans):
             later_covers, drawings_valid, clip_state_present = \
                 _opaque_paint_rects(page, paint_log)
             if not drawings_valid or clip_state_present:
-                return set()
+                return set(), set()
             later_covers.extend(_opaque_text_paint_rects(
                 traces, paint_log))
 
@@ -2339,7 +2341,7 @@ def struck_values(doc, visible_spans):
                             and _covered(trace_rect, [span_rect], frac=0.8)):
                         trace_matches.append(sequence)
                 if len(trace_matches) != 1:
-                    return set()
+                    return set(), set()
                 sequence_trusted.append(
                     (span, span_rect, span_tokens, trace_matches[0]))
 
@@ -2386,7 +2388,7 @@ def struck_values(doc, visible_spans):
 
             for word in page.get_text("words"):
                 if len(word) < 5:
-                    return set()
+                    return set(), set()
                 tokens = _strike_tokens(word[4])
                 if len(tokens) != 1:
                     continue
@@ -2435,13 +2437,23 @@ def struck_values(doc, visible_spans):
                     break
                 occurrences.setdefault(token, []).append(is_struck)
 
-        return {
+        global_values = {
             token for token, states in occurrences.items()
             if len(states) == visible_counts.get(token, 0)
             and states and all(states)
         }
+        local_authority_values = {
+            token for token, states in occurrences.items()
+            if states and any(states)
+        }
+        return global_values, local_authority_values
     except Exception:
-        return set()
+        return set(), set()
+
+
+def struck_values(doc, visible_spans):
+    """Backward-compatible ordinary-pool cancellation token set."""
+    return struck_value_sets(doc, visible_spans)[0]
 
 
 def injection_signals(hidden_spans):

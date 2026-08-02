@@ -487,6 +487,7 @@ def read_note_finding(doc, case_id, page_types_by_no, page_texts_by_no,
     # no signed correction is in play (the FA-adjacent direction keeps the strict
     # correction guard: a correction could itself drive the decision).
     if (approve_mode and approve_pages and not votes
+            and "approved" not in struck
             and not _has_correction(doc_notes)):
         return "APPROVED", {"finding": "APPROVED", "pages": sorted(set(approve_pages)),
                             "channels": ["fv+reason"]}

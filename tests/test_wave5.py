@@ -5,7 +5,8 @@ import fitz
 import pytest
 
 from mib import extract, parse_ocr, rules
-from mib.forensics import classify_spans, sanitize_text, struck_values
+from mib.forensics import (classify_spans, sanitize_text, struck_value_sets,
+                           struck_values)
 from mib.pipeline import (FALLBACKS, TEXT_SOURCE_RANK,
                           _retained_baseline_context_candidate,
                           _select_baseline_supported_candidate,
@@ -212,6 +213,11 @@ def _struck(doc):
     return struck_values(doc, visible)
 
 
+def _strike_sets(doc):
+    visible, _ = classify_spans(doc)
+    return struck_value_sets(doc, visible)
+
+
 def test_struck_word_detected():
     assert "unpaid" in _struck(_strike_doc("Fee Status: unpaid"))
 
@@ -373,6 +379,92 @@ def test_recovered_approval_cannot_bypass_action_strike_guard(monkeypatch):
     prediction, detail = decide(state)
     assert prediction["adjudication"] == "NEEDS_REVIEW"
     assert detail["reasons"] == ["strike_cancellation_guard"]
+
+
+def test_local_struck_finding_cannot_hide_behind_unstruck_duplicate():
+    doc = _strike_doc("Finding: APPROVED")
+    duplicate_page = doc.new_page(width=612, height=792)
+    duplicate_page.insert_text((100, 100), "APPROVED", fontsize=11)
+    global_values, authority_values = _strike_sets(doc)
+    assert "approved" not in global_values
+    assert "approved" in authority_values
+
+    state = _approval_state()
+    state["pools"]["risk_flags"] = [[
+        "active_warrant", "biometric", 3, 95.0, "active_warrant"]]
+    state["struck_values"] = sorted(global_values)
+    state["struck_authority_values"] = sorted(authority_values)
+    state["doc_notes"] = {
+        "finding": "APPROVED",
+        "finding_authority_origin": {"view": "masked_pdf_render"},
+    }
+    state["composited_rank1_payload"] = _composited_values(
+        finding="APPROVED")
+    prediction, detail = decide(state)
+    assert prediction["adjudication"] == "DENIED"
+    assert detail["reasons"] == ["disqualifying_flag"]
+    assert detail["finding_note"] is None
+
+
+def test_struck_signed_fee_correction_cannot_override_unpaid_evidence():
+    state = _approval_state()
+    state["pools"]["fee_status"] = [[
+        "unpaid", "fee_receipt", 2, 95.0, "unpaid"]]
+    state["struck_values"] = ["paid"]
+    state["doc_notes"]["corrections"] = {"fee_status": "paid"}
+    state["composited_rank1_payload"] = _composited_values(
+        fee_status="paid")
+    prediction, detail = decide(state)
+    assert prediction["fee_status"] == "unpaid"
+    assert prediction["adjudication"] == "DENIED"
+    assert detail["reasons"] == ["unpaid_fee"]
+    assert detail["composited_rank1_payload"]["values"] == {}
+
+
+def test_struck_name_correction_cannot_override_ordinary_name():
+    state = _approval_state()
+    state["pools"]["applicant_name"] = [[
+        "Tekdane Ixovara", "intake", 2, 95.0, "Tekdane Ixovara"]]
+    state["struck_values"] = ["ari"]
+    state["doc_notes"]["name_correction"] = "Ari Vale"
+    state["composited_rank1_payload"] = _composited_values(
+        applicant_name="Ari Vale")
+    prediction, detail = decide(state)
+    assert prediction["applicant_name"] == "Tekdane Ixovara"
+    assert prediction["adjudication"] == "APPROVED"
+    assert "applicant_name" not in detail["rank1_payload"]["fields"]
+
+
+@pytest.mark.parametrize("visa_class", ["XW-1", "DIP-1"])
+def test_struck_waiver_code_cannot_open_fee_unread_approval(visa_class):
+    control = _approval_state(candidate_visa=visa_class)
+    control["pools"].pop("fee_status")
+    control["doc_notes"]["waiver_code"] = "DIP-WAIVER"
+    control_prediction, _ = decide(control)
+    assert control_prediction["fee_status"] == "waived"
+    assert control_prediction["adjudication"] == "APPROVED"
+
+    attacked = _approval_state(candidate_visa=visa_class)
+    attacked["pools"].pop("fee_status")
+    attacked["doc_notes"]["waiver_code"] = "DIP-WAIVER"
+    attacked["struck_values"] = ["dip-waiver"]
+    prediction, detail = decide(attacked)
+    assert prediction["adjudication"] == "NEEDS_REVIEW"
+    assert detail["reasons"] == ["insufficient_evidence:1"]
+    assert detail["waiver_code"] is None
+
+
+def test_struck_recovered_approval_cannot_override_ordinary_denial(
+        monkeypatch):
+    monkeypatch.setenv("MIB_NOTE_ROI_APPROVE", "1")
+    state = _approval_state()
+    state["pools"]["risk_flags"] = [[
+        "active_warrant", "biometric", 3, 95.0, "active_warrant"]]
+    state["struck_values"] = ["approved"]
+    state["doc_notes"]["recovered_finding"] = "APPROVED"
+    prediction, detail = decide(state)
+    assert prediction["adjudication"] == "DENIED"
+    assert detail["reasons"] == ["disqualifying_flag"]
 
 
 # ----------------------------------------------------- registry status blocker

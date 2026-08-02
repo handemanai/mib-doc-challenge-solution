@@ -1056,6 +1056,59 @@ def _strike_approval_block_fields(struck_values, pools, batch_revoked):
     return frozenset(affected)
 
 
+def _sanitize_rank1_strikes(doc_notes, composited_payload, struck_values):
+    """Remove crossed-out values from every approval-capable note channel.
+
+    Pool filtering alone is insufficient because signed note fields are applied
+    afterward and can overwrite the selected ordinary evidence. Work on copies
+    so ``decide`` remains pure over its caller-owned state. Monotone note signals
+    such as absence, registry review, and conflicts are intentionally retained.
+    """
+    struck = set(struck_values or ())
+    notes = dict(doc_notes) if isinstance(doc_notes, dict) else {}
+    raw_corrections = notes.get("corrections", {})
+    notes["corrections"] = {
+        field: value for field, value in raw_corrections.items()
+        if not _value_is_struck(value, struck)
+    } if isinstance(raw_corrections, dict) else {}
+
+    if _value_is_struck(notes.get("finding", ""), struck):
+        notes.pop("finding", None)
+        notes.pop("finding_rank", None)
+        notes.pop("finding_authority_origin", None)
+    if _value_is_struck(notes.get("recovered_finding", ""), struck):
+        notes.pop("recovered_finding", None)
+    if _value_is_struck(notes.get("name_correction", ""), struck):
+        notes.pop("name_correction", None)
+    if _value_is_struck(notes.get("waiver_code", ""), struck):
+        notes.pop("waiver_code", None)
+
+    payload = (dict(composited_payload)
+               if isinstance(composited_payload, dict) else {})
+    raw_values = payload.get("values", {})
+    values = {}
+    if isinstance(raw_values, dict):
+        for field, observed in raw_values.items():
+            if not isinstance(observed, list):
+                continue
+            kept = [value for value in observed
+                    if isinstance(value, str) and value
+                    and not _value_is_struck(value, struck)]
+            if kept:
+                values[field] = kept
+    payload["values"] = values
+    raw_evidence = payload.get("evidence", {})
+    if isinstance(raw_evidence, dict):
+        payload["evidence"] = {
+            field: [record for record in records
+                    if isinstance(record, dict)
+                    and not _value_is_struck(record.get("value", ""), struck)]
+            for field, records in raw_evidence.items()
+            if isinstance(records, list)
+        }
+    return notes, payload
+
+
 def _baseline_selected_candidate(state, field):
     """Return one unambiguous P0-B baseline candidate, if available."""
     context = state.get("baseline_batch_context")
@@ -1080,6 +1133,11 @@ def _baseline_selected_candidate(state, field):
             not isinstance(value, str) or not value
             for value in signed_values):
         return None, "ambiguous"
+    signed_values = [
+        value for value in signed_values
+        if not _value_is_struck(
+            value, state.get("struck_authority_values",
+                             state.get("struck_values", [])))]
     candidates.extend([
         [value, "manual_correction", 1, 99.0, value]
         for value in signed_values
@@ -1597,7 +1655,10 @@ def _extract_baseline_state(pdf_path, doc, raw_pdf):
     # Recompute once after HQ passes may have added pages.
     ocr_candidates, doc_notes = parse_ocr.merge_candidates(
         [record[2] for record in sorted(per_page)])
-    struck_values = sorted(forensics.struck_values(doc, visible))
+    struck_values, struck_authority_values = forensics.struck_value_sets(
+        doc, visible)
+    struck_values = sorted(struck_values)
+    struck_authority_values = sorted(struck_authority_values)
     composited_rank1_payload = _composited_rank1_attestation(
         baseline_note_views)
 
@@ -1677,7 +1738,7 @@ def _extract_baseline_state(pdf_path, doc, raw_pdf):
         try:
             recovered = noteread.note_finding(
                 doc, case_id, candidate_type_by_no, candidate_lines_by_page,
-                doc_notes, struck_values, hidden)
+                doc_notes, struck_authority_values, hidden)
         except Exception:
             recovered = None
         if recovered is not None:
@@ -1799,6 +1860,7 @@ def _extract_baseline_state(pdf_path, doc, raw_pdf):
         "identity_disqualified_pages": [],
         "native_fallback_review_pages": [],
         "struck_values": struck_values,
+        "struck_authority_values": struck_authority_values,
         "container": forensics.container_signals(doc, raw_pdf),
         "mean_ocr_conf": round(sum(ocr_quality) / len(ocr_quality), 2) if ocr_quality else 0.0,
         "injection": forensics.injection_signals(hidden),
@@ -2130,7 +2192,6 @@ def _arbitrate_date_pool(date_pool, receipt_date):
 
 def decide(state, receipt_date=None, batch_revoked=frozenset()):
     """Pure decision function over extracted state."""
-    doc_notes = state["doc_notes"]
     pools = state["pools"]
 
     # A value cancelled by a colored strikethrough is never the true value
@@ -2139,6 +2200,10 @@ def decide(state, receipt_date=None, batch_revoked=frozenset()):
     # is struck becomes unread and follows the normal hedge paths — a
     # false-positive strike can therefore cause a hedge, never an approval.
     struck = set(state.get("struck_values", []))
+    authority_struck = set(state.get("struck_authority_values", struck))
+    doc_notes, composited_rank1_payload = _sanitize_rank1_strikes(
+        state.get("doc_notes", {}),
+        state.get("composited_rank1_payload", {}), authority_struck)
     strike_approval_block_fields = _strike_approval_block_fields(
         struck, pools, batch_revoked) if struck else frozenset()
     if struck:
@@ -2461,7 +2526,7 @@ def decide(state, receipt_date=None, batch_revoked=frozenset()):
         and doc_notes.get("finding_authority_origin", {}).get("view")
         in {"masked_pdf_render", "visible_text_layer"}
     )
-    composited = state.get("composited_rank1_payload") or {}
+    composited = composited_rank1_payload
     composited_values = composited.get("values", {}) \
         if isinstance(composited, dict) else {}
     composited_conflicts = set(composited.get("conflicts", ())) \
@@ -2499,9 +2564,7 @@ def decide(state, receipt_date=None, batch_revoked=frozenset()):
         "finding_authority_origin": doc_notes.get(
             "finding_authority_origin"),
         "rank1_payload": rank1_payload,
-        "composited_rank1_payload": state.get(
-            "composited_rank1_payload",
-            {"values": {}, "conflicts": [], "evidence": {}}),
+        "composited_rank1_payload": composited_rank1_payload,
         "rank1_conflicts": doc_notes.get("rank1_conflicts", []),
         "rank1_conflict_evidence": doc_notes.get(
             "rank1_conflict_evidence", []),
@@ -2570,9 +2633,7 @@ def decide(state, receipt_date=None, batch_revoked=frozenset()):
         "finding_authority_origin": doc_notes.get(
             "finding_authority_origin"),
         "rank1_payload": rank1_payload,
-        "composited_rank1_payload": state.get(
-            "composited_rank1_payload",
-            {"values": {}, "conflicts": [], "evidence": {}}),
+        "composited_rank1_payload": composited_rank1_payload,
         "rank1_conflicts": doc_notes.get("rank1_conflicts", []),
         "rank1_conflict_evidence": doc_notes.get(
             "rank1_conflict_evidence", []),
