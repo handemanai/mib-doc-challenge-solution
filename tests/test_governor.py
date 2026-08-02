@@ -10,6 +10,7 @@ force-level seam, and the receipt-schema wiring that keeps official runs
 honest about governor state.
 """
 import importlib.util
+import json
 import os
 from pathlib import Path
 from unittest import mock
@@ -37,6 +38,8 @@ _SHARD_SPEC.loader.exec_module(RUN_SHARD_MODULE)
 def test_level_file_name_is_synchronized():
     assert (PREDICT_MODULE.GOVERNOR_LEVEL_FILE
             == RUN_SHARD_MODULE.GOVERNOR_LEVEL_FILE)
+    assert (PREDICT_MODULE.GOVERNOR_MAX_LEVEL
+            == RUN_SHARD_MODULE.GOVERNOR_MAX_LEVEL)
 
 
 def test_ladder_shape_and_thresholds_are_sane():
@@ -179,6 +182,78 @@ def test_completion_counter_is_incremental_across_files(tmp_path):
         handle.write("{}\n")
     assert counter.poll() == 4
     assert counter.poll() == 4  # no growth, no re-read
+
+
+# --- per-case ledger evidence -----------------------------------------------
+
+def _ledger_fixture(case_id, governor_level=...):
+    state = {
+        "case_id": case_id,
+        "pools": {"intake": []},
+        "doc_notes": {},
+        "extraction": {
+            "attempt_count": 1,
+            "recovered": False,
+            "attempts": [{"attempt": 1, "status": "success"}],
+        },
+    }
+    if governor_level is not ...:
+        state["governor_level"] = governor_level
+    prediction = {
+        "case_id": case_id,
+        **PREDICT_MODULE.FALLBACKS,
+        "adjudication": "NEEDS_REVIEW",
+        "confidence": 0.3,
+    }
+    return state, prediction
+
+
+def test_governor_level_survives_state_merge_and_ledger_publication(tmp_path):
+    case_id = "MIB-000001"
+    pdf = tmp_path / f"{case_id}.pdf"
+    state_file = tmp_path / "state0_g1.jsonl"
+    state, prediction = _ledger_fixture(case_id, governor_level=3)
+    state_file.write_text(json.dumps(state) + "\n")
+
+    merged = PREDICT_MODULE._collect_states(
+        [_FakeShard([state_file])], [str(pdf)], complete=True)
+    assert len(merged) == 1
+    assert merged[0]["governor_level"] == 3
+
+    published = json.loads(json.dumps(
+        PREDICT_MODULE._ledger_row(prediction, {}, merged[0])))
+    assert published["case_id"] == case_id
+    assert published["governor_level"] == 3
+
+
+@pytest.mark.parametrize("level", [0, 1, 2, 3, 4])
+def test_ledger_publishes_only_valid_governor_integers(level):
+    state, prediction = _ledger_fixture("MIB-000001", governor_level=level)
+    row = PREDICT_MODULE._ledger_row(prediction, {}, state)
+    assert type(row["governor_level"]) is int
+    assert row["governor_level"] == level
+
+
+def test_ledger_normalizes_omitted_governor_level_to_full_quality_zero():
+    state, prediction = _ledger_fixture("MIB-000001")
+    assert PREDICT_MODULE._ledger_row(
+        prediction, {}, state)["governor_level"] == 0
+
+
+def test_governor_ledger_evidence_does_not_mutate_prediction():
+    state, prediction = _ledger_fixture("MIB-000001", governor_level=4)
+    prediction_bytes = json.dumps(prediction, sort_keys=True)
+    row = PREDICT_MODULE._ledger_row(prediction, {}, state)
+    assert row["governor_level"] == 4
+    assert json.dumps(prediction, sort_keys=True) == prediction_bytes
+
+
+@pytest.mark.parametrize("malformed", [True, -1, 5, 2.0, "2", None, {}])
+def test_ledger_fails_closed_on_malformed_governor_level(malformed):
+    state, prediction = _ledger_fixture(
+        "MIB-000001", governor_level=malformed)
+    row = PREDICT_MODULE._ledger_row(prediction, {}, state)
+    assert row["governor_level"] is None
 
 
 # --- worker application ------------------------------------------------------

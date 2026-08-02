@@ -82,6 +82,7 @@ GOVERNOR_TARGET_FLOOR_FRACTION = 0.7            # small-batch reserve floor
 GOVERNOR_SECS_PER_PDF = 6.0                     # the challenge's per-PDF budget
 GOVERNOR_UP = ((1.70, 4), (1.35, 3), (1.12, 2), (1.00, 1))
 GOVERNOR_DOWN = {1: 0.95, 2: 1.06, 3: 1.28, 4: 1.60}
+GOVERNOR_MAX_LEVEL = max(level for _, level in GOVERNOR_UP)
 
 
 class _Governor:
@@ -1007,6 +1008,22 @@ def _failure_detail(state, exc):
     }
 
 
+def _ledger_governor_level(state):
+    """Return the worker-attested governor level for evidence publication.
+
+    Level zero is omitted by workers, so absence is the canonical full-quality
+    value. A present value must be an exact integer in the production ladder;
+    booleans, numeric strings, and out-of-range integers become JSON ``null``
+    rather than being coerced into a false provenance claim.
+    """
+    if state is None or "governor_level" not in state:
+        return 0
+    level = state["governor_level"]
+    if type(level) is not int or not 0 <= level <= GOVERNOR_MAX_LEVEL:
+        return None
+    return level
+
+
 def main():
     batch_started = time.monotonic()
     (input_dir, output_path, ledger_path, run_receipt_path,
@@ -1177,6 +1194,7 @@ def _ledger_row(pred, detail, state=None):
         "confidence": pred["confidence"],
         "reasons": detail.get("reasons"),
         "decision_path": detail.get("path"),
+        "governor_level": _ledger_governor_level(state),
         "extraction": (state or {}).get("extraction", {
             "attempt_count": 1, "recovered": False,
             "attempts": [{"attempt": 1, "status": "success"}],
