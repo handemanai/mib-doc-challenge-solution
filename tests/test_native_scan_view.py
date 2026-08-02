@@ -289,10 +289,11 @@ def test_text_image_text_sandwich_keeps_later_overlay_visible_to_selector():
     _insert_direct_scan(page, _base_scan())
     page.insert_text((75, 400), "Fee Status: unpaid", fontsize=18)
     doc = _reopen(doc)
-    _, legacy_hidden = forensics.classify_spans(doc)
-    assert {span.text for span in legacy_hidden
+    visible, hidden = forensics.classify_spans(doc)
+    assert {span.text for span in hidden
             if "under_image" in span.hidden_reasons} >= {
-                "Applicant: Covered Before", "Fee Status: unpaid"}
+                "Applicant: Covered Before"}
+    assert "Fee Status: unpaid" in {span.text for span in visible}
     painted = forensics.painted_overlay_spans(doc)
     assert "Applicant: Covered Before" not in {span.text for span in painted}
     assert "Fee Status: unpaid" in {span.text for span in painted}

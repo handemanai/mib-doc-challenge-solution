@@ -1,10 +1,12 @@
-"""Pixel-decoder invariants: legal-output-only, gate fail-closed, hidden-text
-masking, and synthetic damage roundtrips."""
+"""Pixel-decoder invariants: legal-output-only, gate fail-closed,
+viewer-consistent scan selection, and synthetic damage roundtrips."""
 import hashlib
+import io
 
 import fitz
 import numpy as np
 import pytest
+from PIL import Image
 
 from mib import forensics, pixmatch
 from mib.view_registry import ImageViewRegistry
@@ -34,6 +36,30 @@ def _damage(img, wash=0.4, pepper=0.02, seed=5):
     mask = rng.random(x.shape) < pepper
     x[mask] = rng.integers(0, 90, mask.sum())
     return np.clip(x, 0, 255).astype(np.uint8)
+
+
+def _png(array):
+    buffer = io.BytesIO()
+    Image.fromarray(array).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _reopen(doc):
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    doc.close()
+    return fitz.open(stream=buffer.getvalue(), filetype="pdf")
+
+
+def _assert_p0b_uses_conforming_fallback(doc):
+    page = doc[0]
+    assert forensics.native_full_page_scan(page) is None
+    expected = pixmatch.despeckle(
+        forensics.composited_page_gray(page, dpi=pixmatch.P0B_RENDER_DPI))
+    selected = pixmatch._p0b_scan_images(doc)
+    assert len(selected) == 1 and selected[0][0] == 0
+    assert np.array_equal(selected[0][1], expected)
+    return selected[0][1]
 
 
 def test_enum_decode_reads_damaged_species(monkeypatch):
@@ -105,7 +131,7 @@ def test_enabled_pixmatch_abstains_on_white_over_dark_overlay(monkeypatch):
     doc.close()
 
 
-def test_default_off_pixmatch_preserves_p0b_hidden_bbox_mask(monkeypatch):
+def test_default_off_pixmatch_uses_conforming_overlay_fallback(monkeypatch):
     import io
 
     from PIL import Image
@@ -126,13 +152,17 @@ def test_default_off_pixmatch_preserves_p0b_hidden_bbox_mask(monkeypatch):
     doc = fitz.open(stream=pdf.getvalue(), filetype="pdf")
     _, hidden = forensics.classify_spans(doc)
     image = pixmatch.scan_images(doc, hidden)[0][1]
-    # This intentionally freezes P0-B's off-mode behavior. The enabled native
-    # experiment is covered separately and never applies this PDF-space mask.
+    # Native authorization rejects the evidence-bearing overlay. The baseline
+    # must therefore use the viewer-visible composite, where the white text is
+    # real paint over the dark scan band, rather than decoding raw image bytes.
+    expected = pixmatch.despeckle(
+        forensics.composited_page_gray(doc[0], dpi=pixmatch.P0B_RENDER_DPI))
+    assert np.array_equal(image, expected)
     assert np.count_nonzero(image[760:820, 170:720] > 150) > 0
     doc.close()
 
 
-def test_hardened_selector_drift_is_confined_to_enabled_variant(monkeypatch):
+def test_multiple_image_page_uses_conforming_baseline_fallback(monkeypatch):
     import io
 
     from PIL import Image
@@ -152,9 +182,52 @@ def test_hardened_selector_drift_is_confined_to_enabled_variant(monkeypatch):
     doc = fitz.open(stream=pdf.getvalue(), filetype="pdf")
 
     monkeypatch.setenv("MIB_NATIVE_SCAN_OCR", "0")
-    assert len(pixmatch.scan_images(doc)) == 1
+    _assert_p0b_uses_conforming_fallback(doc)
     monkeypatch.setenv("MIB_NATIVE_SCAN_OCR", "1")
     assert pixmatch.scan_images(doc) == []
+    doc.close()
+
+
+def test_offcrop_large_image_pixels_never_enter_p0b_evidence():
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    hidden_image = np.full((1584, 1224), 20, np.uint8)
+    page.insert_image(fitz.Rect(700, 0, 1312, 792),
+                      stream=_png(hidden_image))
+    doc = _reopen(doc)
+
+    selected = _assert_p0b_uses_conforming_fallback(doc)
+    assert int(selected.min()) >= 250
+    doc.close()
+
+
+def test_clipped_large_image_uses_only_conforming_visible_pixels():
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    source = np.full((1584, 1224), 20, np.uint8)
+    page.insert_image(page.rect, stream=_png(source))
+    content = page.get_contents()[0]
+    original = doc.xref_stream(content)
+    doc.update_stream(
+        content, b"q 0 0 24 24 re W n\n" + original + b"\nQ")
+    doc = _reopen(doc)
+
+    selected = _assert_p0b_uses_conforming_fallback(doc)
+    assert np.count_nonzero(selected < 100) < source.size // 100
+    doc.close()
+
+
+def test_optional_content_image_uses_conforming_default_view():
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    hidden_layer = doc.add_ocg("disabled scan", on=False)
+    page.insert_image(
+        page.rect, stream=_png(np.full((1584, 1224), 20, np.uint8)),
+        oc=hidden_layer)
+    doc = _reopen(doc)
+
+    selected = _assert_p0b_uses_conforming_fallback(doc)
+    assert int(selected.min()) >= 250
     doc.close()
 
 
@@ -363,7 +436,7 @@ def test_struck_pixmatch_value_never_enters_pool_or_ledger(monkeypatch):
                 "p0b_scan_output", "deskewed"]
 
 
-def test_p0b_scan_observer_labels_hidden_mask_preprocessing(monkeypatch):
+def test_p0b_scan_observer_labels_viewer_consistent_preprocessing(monkeypatch):
     monkeypatch.setenv("MIB_NATIVE_SCAN_OCR", "0")
     image = np.arange(400, dtype=np.uint8).reshape(20, 20)
     monkeypatch.setattr(
@@ -378,8 +451,8 @@ def test_p0b_scan_observer_labels_hidden_mask_preprocessing(monkeypatch):
         view_observer=lambda **view: observed.append(view))
     assert images == [(0, image)]
     assert len(observed) == 1
-    assert observed[0]["preprocess"] == \
-        "grayscale_despeckle_hidden_mask"
+    assert observed[0]["source"] == "p0b_viewer_consistent_scan_image"
+    assert observed[0]["preprocess"] == "grayscale_despeckle"
 
 
 def test_nested_pixmatch_observer_preserves_baseexception(monkeypatch):

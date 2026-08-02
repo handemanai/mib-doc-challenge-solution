@@ -258,8 +258,12 @@ def test_type3_whitespace_glyph_cannot_hide_nested_inline_paint():
     doc = _reopen(doc)
     assert len(doc[0].get_images(full=True)) == 1
     assert not doc[0].get_drawings()
-    visible, _ = forensics.classify_spans(doc)
-    assert any(not span.text.strip() for span in visible)
+    visible, hidden = forensics.classify_spans(doc)
+    assert not any(not span.text.strip() for span in visible)
+    assert any(
+        "untrusted_font_context" in span.hidden_reasons
+        for span in hidden
+    )
     assert forensics.native_full_page_scan(doc[0], visible) is None
     doc.close()
 

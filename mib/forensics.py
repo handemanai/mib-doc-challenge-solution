@@ -20,6 +20,14 @@ import numpy as np
 WHITE = (1.0, 1.0, 1.0)
 NEAR_WHITE_MIN = 0.97          # sRGB channel floor treated as white-on-white
 MICRO_SIZE_PT = 2.5
+MIN_TRUSTED_OPACITY = 0.18
+OPACITY_COMPARE_EPSILON = 1e-6
+SPAN_CROP_TOL_PT = 1e-3
+SPAN_VISIBILITY_DPI = 144
+SPAN_UNIFORM_GRAY_RANGE = 1
+SPAN_CONTRAST_GRAY_DELTA = 8
+SPAN_MIN_CONTRAST_PIXEL_FRAC = 0.02
+SPAN_COLOR_MATCH_TOL = 1e-3
 MIN_NATIVE_SCAN_PX_PER_PT = 1.5
 FULL_PAGE_EDGE_TOL_PT = 1e-4
 FOOTER_SUPPRESSION_PAD_PT = 2.0
@@ -36,6 +44,10 @@ _EXPLICIT_ANSWER_KEY_PREFIX = (
 _PDF_XREF_RE = re.compile(r"(?<!\d)(\d+)\s+\d+\s+R\b")
 _DEFAULT_DEVICE_COLOR_RE = re.compile(r"/Default(?:Gray|RGB|CMYK)\b")
 _TRANSPARENCY_GROUP_RE = re.compile(r"/S\s*/Transparency\b")
+_BLEND_MODE_RE = re.compile(
+    r"/BM\s+(\[[^\]]*\]|/[^\s/<>{}\[\]()]*)")
+_SOFT_MASK_RE = re.compile(
+    r"/SMask\s+(/[^\s/<>{}\[\]()]*|\d+\s+\d+\s+R|<<)")
 _PDF_NUMBER_RE = re.compile(
     rb"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$")
 _SAFE_RESOURCE_NAME_RE = re.compile(r"^[A-Za-z0-9_.+:-]+$")
@@ -114,24 +126,396 @@ class Span:
         return bool(self.hidden_reasons)
 
 
-def _cover_rects(page):
-    """Image rectangles drawn AFTER text on this page — an opaque image painted
-    over earlier text hides it visually while leaving the text in the layer
-    (the 'under-image text' injection vector). Uses draw order from
-    get_bboxlog(); a scan page has no text ops so this stays empty, and a native
-    page has no images, so this only ever fires on a genuine text-then-image
-    overlay."""
-    covers, seen_text = [], False
+def _parse_dash_pattern(value):
+    """Parse PyMuPDF's normalized PDF dash string, or return ``None``."""
     try:
-        log = page.get_bboxlog()
+        match = re.fullmatch(
+            r"\[([^\]]*)\]\s+([+-]?(?:\d+(?:\.\d*)?|\.\d+))",
+            str(value).strip())
+        if match is None:
+            return None
+        components = match.group(1).split()
+        pattern = [float(component) for component in components]
+        phase = float(match.group(2))
+        if (not np.isfinite(pattern + [phase]).all()
+                or any(component < 0 for component in pattern)
+                or pattern and sum(pattern) <= 0):
+            return None
+        if len(pattern) % 2 == 1:
+            pattern = pattern * 2
+        return pattern, phase
     except Exception:
-        return covers
-    for op, rect in log:
-        if "text" in op:
-            seen_text = True
-        elif "image" in op and seen_text:
-            covers.append(fitz.Rect(rect))
+        return None
+
+
+def _opaque_paint_rects(page, paint_log):
+    """Return sequence-tagged paint that can hide an earlier text span.
+
+    BBox-log rectangles alone do not prove that a path is opaque.  Bind path
+    entries to ``get_drawings()`` and accept only an actual fill with full
+    opacity.  Images retain the historical conservative treatment; PDF image
+    masks and transparency are difficult to prove from the bbox log, and
+    treating an overlapping image as a cover can only withhold text-layer
+    evidence.  Shadings are color paints and are opaque unless an enclosing
+    graphics state supplies transparency; those unsafe states are already
+    outside the trusted native-image selector, while this classifier
+    conservatively withholds fully covered earlier text.
+    """
+    opaque_fills = {}
+    opaque_strokes = {}
+    drawings_valid = True
+    clip_state_present = False
+    try:
+        drawings = page.get_drawings(extended=True)
+        for drawing in drawings:
+            if drawing.get("type") == "clip":
+                clip_state_present = True
+                continue
+            sequence = drawing.get("seqno")
+            raw_fill_opacity = drawing.get("fill_opacity")
+            fill_opacity = (float(raw_fill_opacity)
+                            if raw_fill_opacity is not None else 0.0)
+            if (isinstance(sequence, int)
+                    and drawing.get("fill") is not None
+                    and np.isfinite(fill_opacity)
+                    and fill_opacity >= 1.0 - 1e-6):
+                items = drawing.get("items") or ()
+                simple_rectangle = bool(
+                    len(items) == 1 and len(items[0]) >= 2
+                    and items[0][0] == "re"
+                    and not drawing.get("even_odd", False))
+                opaque_fills[sequence] = {
+                    "color": tuple(drawing["fill"]),
+                    "simple_rectangle": simple_rectangle,
+                }
+            raw_stroke_opacity = drawing.get("stroke_opacity")
+            stroke_opacity = (float(raw_stroke_opacity)
+                              if raw_stroke_opacity is not None else 0.0)
+            dash_pattern = _parse_dash_pattern(drawing.get("dashes"))
+            if (isinstance(sequence, int)
+                    and drawing.get("color") is not None
+                    and np.isfinite(stroke_opacity)
+                    and stroke_opacity >= 1.0 - 1e-6
+                    and dash_pattern is not None):
+                opaque_strokes[sequence] = {
+                    "color": tuple(drawing["color"]),
+                    "drawing": drawing,
+                }
+    except Exception:
+        # Preserve the bbox-log image / shade inventory below, but mark every
+        # path overlap ambiguous because opacity and geometry are unproven.
+        drawings_valid = False
+        opaque_fills = {}
+        opaque_strokes = {}
+
+    covers = []
+    for sequence, (operation, rect) in enumerate(paint_log):
+        if "image" in operation:
+            covers.append(
+                (sequence, "under_image", fitz.Rect(rect), None))
+        elif operation == "fill-path" and sequence in opaque_fills:
+            covers.append((sequence, "under_fill", fitz.Rect(rect),
+                           opaque_fills[sequence]))
+        elif operation == "stroke-path" and sequence in opaque_strokes:
+            # Bind the bbox-log sequence to the actual vector geometry. The
+            # bbox of a stroked rectangle includes its empty interior and must
+            # never be treated as a solid cover.
+            covers.append((sequence, "under_stroke", fitz.Rect(rect), {
+                "color": opaque_strokes[sequence]["color"],
+                "drawing": opaque_strokes[sequence]["drawing"],
+            }))
+        elif operation == "fill-shade":
+            covers.append((sequence, "under_fill", fitz.Rect(rect), None))
+        elif (not drawings_valid
+              and operation in {"fill-path", "stroke-path"}):
+            covers.append((sequence, "paint_geometry_ambiguous",
+                           fitz.Rect(rect), None))
+    return covers, drawings_valid, clip_state_present
+
+
+def _opaque_text_paint_rects(traces, paint_log):
+    """Return sequence-bound opaque text paint that can cover earlier text."""
+    records = []
+    for raw in traces:
+        try:
+            opacity = float(raw.get("opacity"))
+            render_mode = int(raw.get("type"))
+            bbox = tuple(float(value) for value in raw.get("bbox", ()))
+            if (not np.isfinite([opacity, *bbox]).all()
+                    or len(bbox) != 4
+                    or opacity < 1.0 - OPACITY_COMPARE_EPSILON
+                    or render_mode not in {0, 1, 2, 4, 5, 6}):
+                continue
+            rect = fitz.Rect(bbox)
+            sequence = raw.get("seqno")
+            sequence_valid = (
+                isinstance(sequence, int)
+                and 0 <= sequence < len(paint_log)
+                and "text" in paint_log[sequence][0]
+                and _covered(
+                    rect, [fitz.Rect(paint_log[sequence][1])], frac=0.5)
+                and _covered(
+                    fitz.Rect(paint_log[sequence][1]), [rect], frac=0.5))
+            text_key = (
+                tuple(character[0] for character in raw.get("chars", ())),
+                tuple(round(value, 4) for value in bbox),
+                tuple(round(float(value), 4)
+                      for value in raw.get("color", ())),
+                round(opacity, 4))
+            records.append({
+                "sequence": sequence if sequence_valid else -1,
+                "reason": "under_text" if sequence_valid
+                else "text_paint_order_ambiguous",
+                "rect": rect,
+                "key": text_key,
+                "mode": render_mode,
+            })
+        except Exception:
+            continue
+    # PyMuPDF exposes one fill+stroke text operation as adjacent fill and
+    # stroke traces. Those are two components of the same visible glyph paint,
+    # not an overpaint transaction against each other.
+    transaction_by_index = {}
+    index = 0
+    while index < len(records):
+        members = [index]
+        if index + 1 < len(records):
+            first, second = records[index], records[index + 1]
+            if (first["reason"] == second["reason"] == "under_text"
+                    and first["key"] == second["key"]
+                    and {first["mode"], second["mode"]} == {0, 1}
+                    and second["sequence"] == first["sequence"] + 1):
+                members.append(index + 1)
+        sequences = frozenset(records[position]["sequence"]
+                              for position in members)
+        for position in members:
+            transaction_by_index[position] = sequences
+        index += len(members)
+    covers = []
+    for index, record in enumerate(records):
+        covers.append((
+            record["sequence"], record["reason"], record["rect"],
+            {"transaction_sequences": transaction_by_index.get(
+                index, frozenset())}))
     return covers
+
+
+def _crop_contains_span(crop, span_rect, tolerance=SPAN_CROP_TOL_PT):
+    """Whether an authority-bearing span is wholly inside the crop.
+
+    Text-trace coordinates are floating point. The one-millipoint tolerance is
+    far below a display pixel even at high rendering resolutions and only
+    absorbs representation noise; a materially clipped glyph is not trusted.
+    """
+    return bool(
+        span_rect.x0 >= crop.x0 - tolerance
+        and span_rect.y0 >= crop.y0 - tolerance
+        and span_rect.x1 <= crop.x1 + tolerance
+        and span_rect.y1 <= crop.y1 + tolerance)
+
+
+def _viewer_span_has_contrast(page, span_rect, rendered):
+    """Return whether final viewer pixels vary inside one text rectangle.
+
+    This gate is deliberately used only when an earlier opaque fill wholly
+    covers the span rectangle. It catches same-color text on a solid fill
+    without imposing another render on ordinary pages or treating textured
+    backgrounds as proof that a glyph is visible.
+    """
+    try:
+        viewer_rect = span_rect * page.rotation_matrix
+        sx = rendered.shape[1] / page.rect.width
+        sy = rendered.shape[0] / page.rect.height
+        x0 = max(0, int(np.floor(viewer_rect.x0 * sx)))
+        y0 = max(0, int(np.floor(viewer_rect.y0 * sy)))
+        x1 = min(rendered.shape[1], int(np.ceil(viewer_rect.x1 * sx)))
+        y1 = min(rendered.shape[0], int(np.ceil(viewer_rect.y1 * sy)))
+        if x0 >= x1 or y0 >= y1:
+            return None
+        pixels = rendered[y0:y1, x0:x1]
+        if not pixels.size:
+            return None
+        gray_range = int(pixels.max()) - int(pixels.min())
+        if gray_range <= SPAN_UNIFORM_GRAY_RANGE:
+            return False
+        histogram = np.bincount(pixels.reshape(-1), minlength=256)
+        modal_gray = int(histogram.argmax())
+        contrast_fraction = float(np.count_nonzero(
+            np.abs(pixels.astype(np.int16) - modal_gray)
+            >= SPAN_CONTRAST_GRAY_DELTA)) / float(pixels.size)
+        return contrast_fraction >= SPAN_MIN_CONTRAST_PIXEL_FRAC
+    except Exception:
+        return None
+
+
+def _stroke_covers(span_rect, stroke_records, frac=0.6):
+    """Whether the union of actual vector strokes covers a text rectangle.
+
+    PyMuPDF exposes line, rectangle, quad, and cubic-Bezier path primitives.
+    Rasterizing just those centerlines at the declared stroke width avoids the
+    false authority loss caused by treating an outlined path's whole bbox as
+    paint. The raster is bounded for hostile coordinates and is used only for
+    a span already overlapping a later, fully opaque stroke bbox.
+    """
+    import cv2
+
+    try:
+        if span_rect.width <= 0 or span_rect.height <= 0:
+            return False
+        max_pixels = 1_000_000
+        scale = min(
+            8.0,
+            max(1.0, np.sqrt(max_pixels /
+                             (span_rect.width * span_rect.height))))
+        width = max(1, int(np.ceil(span_rect.width * scale)))
+        height = max(1, int(np.ceil(span_rect.height * scale)))
+        mask = np.zeros((height, width), dtype=np.uint8)
+
+        def point(value):
+            return (int(round((float(value.x) - span_rect.x0) * scale)),
+                    int(round((float(value.y) - span_rect.y0) * scale)))
+
+        def segment(start, end, thickness):
+            cv2.line(mask, point(start), point(end), 255, thickness,
+                     lineType=cv2.LINE_8)
+
+        def polyline(points, thickness, dash_pattern, closed=False):
+            points = list(points)
+            if closed and points and points[0] != points[-1]:
+                points.append(points[0])
+            pattern, phase = dash_pattern
+            if not pattern:
+                for start, end in zip(points, points[1:]):
+                    segment(start, end, thickness)
+                return
+
+            total = sum(pattern)
+            phase %= total
+            index = 0
+            epsilon = 1e-9
+            while phase >= pattern[index] - epsilon:
+                phase -= pattern[index]
+                index = (index + 1) % len(pattern)
+            remaining = pattern[index] - phase
+
+            def advance_zero_lengths():
+                nonlocal index, remaining
+                attempts = 0
+                while remaining <= epsilon and attempts <= len(pattern):
+                    index = (index + 1) % len(pattern)
+                    remaining = pattern[index]
+                    attempts += 1
+
+            advance_zero_lengths()
+            for start, end in zip(points, points[1:]):
+                dx = float(end.x) - float(start.x)
+                dy = float(end.y) - float(start.y)
+                length = float(np.hypot(dx, dy))
+                if length <= epsilon:
+                    continue
+                offset = 0.0
+                while offset < length - epsilon:
+                    advance_zero_lengths()
+                    take = min(remaining, length - offset)
+                    if index % 2 == 0 and take > epsilon:
+                        first = fitz.Point(
+                            start.x + dx * (offset / length),
+                            start.y + dy * (offset / length))
+                        second = fitz.Point(
+                            start.x + dx * ((offset + take) / length),
+                            start.y + dy * ((offset + take) / length))
+                        segment(first, second, thickness)
+                    offset += take
+                    remaining -= take
+
+        for record in stroke_records:
+            drawing = record.get("drawing") if isinstance(record, dict) \
+                else None
+            if not isinstance(drawing, dict):
+                continue
+            stroke_width = float(drawing.get("width") or 0.0)
+            if not np.isfinite(stroke_width) or stroke_width <= 0:
+                continue
+            dash_pattern = _parse_dash_pattern(drawing.get("dashes"))
+            if dash_pattern is None:
+                continue
+            thickness = max(1, int(np.ceil(stroke_width * scale)))
+            for item in drawing.get("items") or ():
+                kind = item[0]
+                if kind == "l" and len(item) >= 3:
+                    polyline(item[1:3], thickness, dash_pattern)
+                elif kind == "re" and len(item) >= 2:
+                    rect = fitz.Rect(item[1])
+                    polyline((rect.tl, rect.tr, rect.br, rect.bl),
+                             thickness, dash_pattern, closed=True)
+                elif kind == "qu" and len(item) >= 2:
+                    quad = fitz.Quad(item[1])
+                    polyline((quad.ul, quad.ur, quad.lr, quad.ll),
+                             thickness, dash_pattern, closed=True)
+                elif kind == "c" and len(item) >= 5:
+                    controls = item[1:5]
+                    points = []
+                    for step in range(25):
+                        t = step / 24.0
+                        one_minus = 1.0 - t
+                        x = (one_minus ** 3 * controls[0].x
+                             + 3 * one_minus ** 2 * t * controls[1].x
+                             + 3 * one_minus * t ** 2 * controls[2].x
+                             + t ** 3 * controls[3].x)
+                        y = (one_minus ** 3 * controls[0].y
+                             + 3 * one_minus ** 2 * t * controls[1].y
+                             + 3 * one_minus * t ** 2 * controls[2].y
+                             + t ** 3 * controls[3].y)
+                        points.append(fitz.Point(x, y))
+                    polyline(points, thickness, dash_pattern)
+        return float(np.count_nonzero(mask)) >= frac * float(mask.size)
+    except Exception:
+        return False
+
+
+def _normalized_rgb(color):
+    """Normalize PyMuPDF gray/RGB/CMYK tuples for paint-color comparison."""
+    try:
+        values = tuple(float(component) for component in color)
+        if not values or not np.isfinite(values).all():
+            return None
+        if len(values) == 1:
+            return (values[0], values[0], values[0])
+        if len(values) == 3:
+            return values
+        if len(values) == 4:
+            cyan, magenta, yellow, black = values
+            return (
+                1.0 - min(1.0, cyan + black),
+                1.0 - min(1.0, magenta + black),
+                1.0 - min(1.0, yellow + black),
+            )
+    except Exception:
+        pass
+    return None
+
+
+def _same_paint_color(left, right, tolerance=SPAN_COLOR_MATCH_TOL):
+    left_rgb = _normalized_rgb(left)
+    right_rgb = _normalized_rgb(right)
+    return bool(left_rgb is not None and right_rgb is not None
+                and np.allclose(left_rgb, right_rgb, rtol=0.0,
+                                atol=tolerance))
+
+
+def _intervening_paint_overlaps(
+        paint_log, first_sequence, last_sequence, span_rect):
+    """Whether another painted operation can alter the candidate background."""
+    try:
+        for sequence in range(first_sequence + 1, last_sequence):
+            operation, rect = paint_log[sequence]
+            if operation.startswith(("fill-", "stroke-")):
+                overlap = span_rect & fitz.Rect(rect)
+                if overlap.width > 1e-6 and overlap.height > 1e-6:
+                    return True
+    except Exception:
+        return True
+    return False
 
 
 def _covered(span_rect, covers, frac=0.6):
@@ -165,9 +549,34 @@ def classify_spans(doc):
     """
     visible, hidden = [], []
     for pno, page in enumerate(doc):
-        page_rect = page.rect
-        covers = _cover_rects(page)
-        for raw in page.get_texttrace():
+        # Text traces and bbox-log entries are in unrotated crop-relative page
+        # space. ``page.rect`` swaps width / height at 90 and 270 degrees and
+        # can therefore admit off-crop text as trusted evidence.
+        page_rect = fitz.Rect(
+            0, 0, page.cropbox.width, page.cropbox.height)
+        try:
+            paint_log = page.get_bboxlog()
+            paint_log_valid = True
+            (covers, drawings_valid,
+             clip_state_present) = _opaque_paint_rects(page, paint_log)
+        except Exception:
+            paint_log_valid = False
+            drawings_valid = False
+            clip_state_present = False
+            paint_log = []
+            covers = []
+        try:
+            traces = page.get_texttrace()
+        except Exception:
+            traces = []
+        if paint_log_valid:
+            covers.extend(_opaque_text_paint_rects(traces, paint_log))
+        unresolved_transparency = _page_has_unresolved_transparency(page)
+        untrusted_font_context = _page_has_untrusted_text_font(
+            page, has_text=bool(traces))
+        viewer_render = None
+        viewer_render_failed = False
+        for raw in traces:
             text = sanitize_text("".join(chr(c[0]) for c in raw["chars"]))
             span = Span(
                 text=text,
@@ -178,8 +587,36 @@ def classify_spans(doc):
                 render_mode=raw["type"],
                 page=pno,
             )
+            finite_metadata = bool(
+                len(span.bbox) == 4 and len(span.color) > 0
+                and np.isfinite([
+                    *span.bbox, *span.color, span.size,
+                    span.opacity, span.render_mode]).all())
+            if not finite_metadata:
+                span.hidden_reasons.append("nonfinite_span_metadata")
+            if not paint_log_valid:
+                span.hidden_reasons.append("paint_inventory_ambiguous")
+            if not drawings_valid:
+                # Extended drawing inspection is the only inventory that
+                # exposes clipping paths and path opacity. If it fails, even a
+                # text-only bbox log cannot prove that the glyphs reached the
+                # viewer, so withhold all native text on the page.
+                span.hidden_reasons.append("drawing_inventory_ambiguous")
+            if clip_state_present:
+                # Texttrace and bboxlog report object geometry before clipping.
+                # Until a span-level clip proof exists, no text on a page with
+                # an explicit clip transaction receives text-layer authority.
+                span.hidden_reasons.append("unresolved_clip_state")
+            if unresolved_transparency:
+                span.hidden_reasons.append("unresolved_transparency")
+            if untrusted_font_context:
+                span.hidden_reasons.append("untrusted_font_context")
             if span.opacity == 0:
                 span.hidden_reasons.append("opacity0")
+            elif (np.isfinite(span.opacity)
+                  and span.opacity < MIN_TRUSTED_OPACITY
+                  - OPACITY_COMPARE_EPSILON):
+                span.hidden_reasons.append("low_opacity")
             # Preserve the shipped P0-B masking contract exactly. The native
             # selector has its own physical paint inventory so making modes
             # 2/4/5/6 visible there cannot drift the disabled control.
@@ -187,12 +624,136 @@ def classify_spans(doc):
                 span.hidden_reasons.append("invisible_render_mode")
             if all(c >= NEAR_WHITE_MIN for c in span.color):
                 span.hidden_reasons.append("white_text")
-            if not page_rect.intersects(fitz.Rect(span.bbox)):
+            span_rect = (fitz.Rect(span.bbox)
+                         if np.isfinite(span.bbox).all() else None)
+            if span_rect is None or not _crop_contains_span(
+                    page_rect, span_rect):
                 span.hidden_reasons.append("off_crop")
             if span.size < MICRO_SIZE_PT:
                 span.hidden_reasons.append("microtext")
-            if covers and _covered(fitz.Rect(span.bbox), covers):
-                span.hidden_reasons.append("under_image")
+            sequence = raw.get("seqno")
+            sequence_valid = (
+                span_rect is not None
+                and isinstance(sequence, int)
+                and 0 <= sequence < len(paint_log)
+                and "text" in paint_log[sequence][0]
+                and _covered(
+                    span_rect, [fitz.Rect(paint_log[sequence][1])], frac=0.5)
+                and _covered(
+                    fitz.Rect(paint_log[sequence][1]), [span_rect], frac=0.5))
+            if covers and span_rect is not None:
+                if any(
+                        reason == "text_paint_order_ambiguous"
+                        and _covered(span_rect, [rect])
+                        for _, reason, rect, _ in covers):
+                    span.hidden_reasons.append("paint_order_ambiguous")
+                if not drawings_valid and any(
+                        reason == "paint_geometry_ambiguous"
+                        and (span_rect & rect).width > 1e-6
+                        and (span_rect & rect).height > 1e-6
+                        for _, reason, rect, _ in covers):
+                    span.hidden_reasons.append("paint_geometry_ambiguous")
+                if sequence_valid:
+                    candidates = [
+                        (reason, rect, color)
+                        for cover_sequence, reason, rect, color in covers
+                        if cover_sequence > sequence
+                        and not (
+                            reason == "under_text"
+                            and isinstance(color, dict)
+                            and sequence in color.get(
+                                "transaction_sequences", ()))
+                    ]
+                    for reason in ("under_image", "under_text"):
+                        if _covered(
+                                span_rect,
+                                [rect for candidate_reason, rect, _ in candidates
+                                 if candidate_reason == reason]):
+                            span.hidden_reasons.append(reason)
+
+                    later_simple_fills = [
+                        rect for reason, rect, metadata in candidates
+                        if reason == "under_fill"
+                        and isinstance(metadata, dict)
+                        and metadata.get("simple_rectangle") is True
+                    ]
+                    if _covered(span_rect, later_simple_fills):
+                        span.hidden_reasons.append("under_fill")
+                    later_complex_fill = any(
+                        reason == "under_fill"
+                        and not (isinstance(metadata, dict)
+                                 and metadata.get("simple_rectangle") is True)
+                        and _covered(span_rect, [rect])
+                        for reason, rect, metadata in candidates)
+
+                    # Stroke bbox logs enclose the complete path geometry, not
+                    # just painted stroke pixels. A stroked form rectangle can
+                    # therefore contain perfectly visible text in its empty
+                    # interior. Only withhold a suspected later-stroke span
+                    # when the final viewer pixels do not contain a meaningful
+                    # glyph-sized contrast population.
+                    later_strokes = [
+                        metadata for reason, _, metadata in candidates
+                        if reason == "under_stroke"
+                    ]
+                    suspected_stroke_cover = _stroke_covers(
+                        span_rect, later_strokes)
+
+                    # Text painted after an opaque solid background can still
+                    # be physically absent when foreground and background use
+                    # the same color. Verify final viewer pixels only for this
+                    # narrowly scoped paint-order relationship.
+                    earlier_backgrounds = [
+                        (cover_sequence, rect, color)
+                        for cover_sequence, reason, rect, color in covers
+                        if cover_sequence < sequence
+                        and reason in {"under_fill", "under_image"}
+                        and _fully_covered(span_rect, [rect])
+                    ]
+                    background = (max(earlier_backgrounds, key=lambda item: item[0])
+                                  if earlier_backgrounds else None)
+                    simple_same_color_background = bool(
+                        background is not None
+                        and isinstance(background[2], dict)
+                        and background[2].get("simple_rectangle") is True
+                        and _same_paint_color(
+                            span.color, background[2].get("color"))
+                        and not _intervening_paint_overlaps(
+                            paint_log, background[0], sequence, span_rect))
+                    if simple_same_color_background:
+                        # This semantic paint comparison is independent of
+                        # later texture or a planted contrasting speck inside
+                        # the bbox: same-color glyphs on their containing fill
+                        # do not become readable evidence.
+                        span.hidden_reasons.append(
+                            "no_visible_color_contrast")
+                    if (later_complex_fill
+                            or background is not None
+                            and not simple_same_color_background):
+                        if viewer_render is None and not viewer_render_failed:
+                            try:
+                                viewer_render = composited_page_gray(
+                                    page, dpi=SPAN_VISIBILITY_DPI)
+                            except Exception:
+                                viewer_render_failed = True
+                        contrast = None if viewer_render is None else \
+                            _viewer_span_has_contrast(
+                                page, span_rect, viewer_render)
+                        if contrast is False:
+                            span.hidden_reasons.append(
+                                "under_fill" if later_complex_fill
+                                else "no_visible_pixel_contrast")
+                        elif contrast is None:
+                            span.hidden_reasons.append(
+                                "viewer_visibility_ambiguous")
+                    if suspected_stroke_cover:
+                        span.hidden_reasons.append("under_stroke")
+                # Missing or contradictory sequence metadata cannot prove
+                # whether overlapping opaque paint preceded or followed the
+                # text. Withhold that span rather than grant text authority.
+                elif _covered(
+                        span_rect, [rect for _, _, rect, _ in covers]):
+                    span.hidden_reasons.append("paint_order_ambiguous")
             (hidden if span.hidden else visible).append(span)
     return visible, hidden
 
@@ -1008,13 +1569,51 @@ def _image_has_unsafe_graphics_state(page, image_name):
         return True
 
 
-def _has_unsafe_font_context(page):
-    """Reject fonts whose glyph program can hide independent paint operations."""
+_CANONICAL_BASE14_FONTS = {
+    "Helvetica", "Helvetica-Bold", "Helvetica-Oblique", "Times-Roman"}
+
+
+def _page_has_untrusted_text_font(page, has_text=True):
+    """Whether native text uses anything outside the public Base-14 contract.
+
+    A PDF font's character mapping, embedded outlines, or Type3 glyph program
+    can disagree with texttrace semantics. Public evidence uses only four
+    unembedded Type1 Base-14 fonts with WinAnsi encoding, so native text from a
+    broader font contract is withheld and remains recoverable through the
+    composited OCR lane.
+    """
     try:
-        for font in page.get_fonts(full=True):
-            if len(font) < 3 or font[2] == "Type3":
+        fonts = page.get_fonts(full=True)
+        if has_text and not fonts:
+            return True
+        doc = page.parent
+        for font in fonts:
+            if (len(font) < 6
+                    or not isinstance(font[0], int) or font[0] <= 0
+                    or font[1] != "n/a"
+                    or font[2] != "Type1"
+                    or font[3] not in _CANONICAL_BASE14_FONTS
+                    or font[5] != "WinAnsiEncoding"):
+                return True
+            xref = font[0]
+            if (doc.xref_get_key(xref, "Subtype") != ("name", "/Type1")
+                    or doc.xref_get_key(xref, "BaseFont") !=
+                    ("name", "/" + font[3])
+                    or doc.xref_get_key(xref, "Encoding") !=
+                    ("name", "/WinAnsiEncoding")
+                    or doc.xref_get_key(xref, "ToUnicode")[0] != "null"
+                    or doc.xref_get_key(xref, "FontDescriptor")[0] != "null"):
                 return True
         return False
+    except Exception:
+        return True
+
+
+def _has_unsafe_font_context(page):
+    """Native-image selector alias for the canonical text-font contract."""
+    try:
+        return _page_has_untrusted_text_font(
+            page, has_text=bool(page.get_texttrace()))
     except Exception:
         return True
 
@@ -1153,6 +1752,78 @@ def _resource_graph_is_unsafe(doc, kind, value):
     if kind == "dict":
         return inspect_text(value)
     return True
+
+
+def _page_has_unresolved_transparency(page):
+    """Detect blend modes and soft masks that texttrace cannot attest.
+
+    PyMuPDF reports ordinary alpha as span opacity, but a non-Normal blend mode
+    or soft mask can make opaque black text disappear against the painted page
+    while texttrace still reports black at opacity 1. Inspect the effective
+    resource graph, including referenced Form resources, and fail closed on a
+    malformed or excessively large graph.
+    """
+    try:
+        doc, page_tree = _page_tree_xrefs(page)
+        resource = None
+        for xref in page_tree:
+            kind, value = doc.xref_get_key(xref, "Resources")
+            if kind != "null":
+                resource = (kind, value)
+                break
+        if resource is None:
+            return False
+        visited = set()
+        active = set()
+
+        def unsafe_text(text):
+            decoded = _decode_pdf_name_escapes(text)
+            image_xobject = bool(
+                re.search(r"/Subtype\s*/Image\b", decoded))
+            for match in _BLEND_MODE_RE.finditer(decoded):
+                operand = match.group(1).strip()
+                names = re.findall(r"/[A-Za-z0-9_.+-]+", operand)
+                if not names or any(name != "/Normal" for name in names):
+                    return True
+            for match in _SOFT_MASK_RE.finditer(decoded):
+                # An image alpha mask is ordinary viewer-visible image paint;
+                # it does not alter unrelated text-layer blend semantics. This
+                # guard targets page/Form ExtGState soft masks.
+                if not image_xobject and match.group(1) != "/None":
+                    return True
+            for referenced in _PDF_XREF_RE.findall(decoded):
+                if unsafe_xref(int(referenced)):
+                    return True
+            return False
+
+        def unsafe_xref(xref):
+            if xref in active:
+                return True
+            if xref in visited:
+                return False
+            if (xref <= 0 or xref >= doc.xref_length()
+                    or len(visited) >= 512):
+                return True
+            active.add(xref)
+            try:
+                text = doc.xref_object(xref, compressed=False)
+                if not isinstance(text, str) or not text.strip() \
+                        or text.strip() == "null":
+                    return True
+                unsafe = unsafe_text(text)
+            finally:
+                active.remove(xref)
+            visited.add(xref)
+            return unsafe
+
+        kind, value = resource
+        if kind == "xref":
+            return unsafe_xref(_xref_value(doc, kind, value))
+        if kind == "dict":
+            return unsafe_text(value)
+        return True
+    except Exception:
+        return True
 
 
 def _has_unsafe_color_context(page):

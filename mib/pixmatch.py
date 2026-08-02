@@ -16,13 +16,13 @@ real matching carries the generator's exact rasterizer + JPEG response that
 synthetic renders miss (~0.3 NCC of fidelity). Unbanked values fall back to
 synthetic base-14 renders in the per-label weight/size measured on dev.
 
-Injection-inert by construction: only the embedded scan raster is read (hidden
-PDF text cannot exist inside a raster), and only legal vocabulary values can
-be emitted. The enabled native experiment never lets PDF-object bounding boxes
-modify independent scan pixels; the disabled control intentionally retains the
-previously approved P0-B implementation for exact comparison. Reads enter the
-evidence pools at harvest rank and pass the same precedence / agreement /
-approval-gate machinery as every other source.
+Injection-inert by construction: only viewer-consistent pixels are read, and
+only legal vocabulary values can be emitted. A raw embedded scan is eligible
+only after the full-page selector binds it to the crop and paint transaction;
+otherwise P0-B reads the conforming 144-DPI composite. PDF-object bounding
+boxes never modify independent scan pixels. Reads enter the evidence pools at
+harvest rank and pass the same precedence / agreement / approval-gate
+machinery as every other source.
 """
 import itertools
 import hashlib
@@ -39,6 +39,7 @@ from .vocab import FEES, FLAGS, PURPOSES, SPECIES, VISAS, WORLDS
 LABEL_MIN_NCC = 0.45          # below this the label anchor is not trusted
 VALUE_STRIP_W = 560           # px right of the label to search for the value
 MIN_SCAN_W = 1100             # P0-B full-page scan signature (1224 nominal)
+P0B_RENDER_DPI = 144          # template bank is registered on the 2x page grid
 
 # field -> visible label variants on the scan template.
 FIELD_LABELS = {
@@ -231,17 +232,13 @@ def scan_images(doc, hidden_spans=None, visible_spans=None,
     if not native_view:
         images = _p0b_scan_images(doc, hidden_spans)
         for page_number, image in images:
-            masked = any(
-                getattr(span, "page", None) == int(page_number)
-                for span in hidden_spans or ())
             _notify_scan_view(
                 view_observer, page_number=int(page_number),
                 transform="p0b_scan_output", image=image,
-                source="p0b_masked_scan_image",
+                source="p0b_viewer_consistent_scan_image",
                 dpi=_image_dpi(doc, page_number, image),
                 rotation_degrees=0.0,
-                preprocess=("grayscale_despeckle_hidden_mask" if masked
-                            else "grayscale_despeckle"))
+                preprocess="grayscale_despeckle")
         return images
 
     out = []
@@ -262,30 +259,45 @@ def scan_images(doc, hidden_spans=None, visible_spans=None,
 
 
 def _p0b_scan_images(doc, hidden_spans=None):
-    """Byte-for-byte P0-B pixel-channel selection for the disabled control."""
-    import io
+    """Return viewer-consistent scan pixels on the P0-B template grid.
 
-    import cv2
-    from PIL import Image
+    The historical implementation decoded the first large image resource by
+    xref.  A resource can be clipped, off-crop, optional, or merely unused, so
+    those bytes are not necessarily evidence a conforming viewer can see.  Use
+    the hardened full-page selector when it can bind one physical scan.  When
+    it abstains, render the composited page at the 2x (144-DPI) grid used by the
+    template bank.  The fallback therefore preserves visible overlays while
+    excluding pixels hidden by crop, clipping, paint order, or optional content.
 
+    ``hidden_spans`` remains accepted for API compatibility, but untrusted PDF
+    object boxes never modify either physical view.
+    """
     out = []
     for page in doc:
-        ims = [im for im in page.get_images(full=True) if im[2] >= MIN_SCAN_W]
-        if not ims:
+        try:
+            scan_like = any(
+                len(image) >= 3 and int(image[2]) >= MIN_SCAN_W
+                for image in page.get_images(full=True)
+            )
+        except Exception:
+            scan_like = False
+        if not scan_like:
             continue
-        info = doc.extract_image(ims[0][0])
-        img = despeckle(np.array(Image.open(io.BytesIO(info["image"])).convert("L")))
-        if hidden_spans:
-            sx = img.shape[1] / page.rect.width
-            sy = img.shape[0] / page.rect.height
-            paper = int(np.median(img))
-            for span in hidden_spans:
-                if span.page != page.number:
-                    continue
-                x0, y0, x1, y1 = span.bbox
-                cv2.rectangle(img, (int(x0 * sx) - 2, int(y0 * sy) - 2),
-                              (int(x1 * sx) + 2, int(y1 * sy) + 2), paper, -1)
-        out.append((page.number, img))
+        metadata = forensics.native_full_page_scan(page)
+        image = None
+        if metadata is not None:
+            try:
+                # Preserve the historical P0-B pixels exactly after the
+                # hardened selector proves that this xref is the one conforming
+                # full-page scan.  Native-ledger footer sanitization and
+                # orientation remain separate from this baseline channel.
+                image, _raw = forensics._decode_native_gray(doc, metadata)
+            except Exception:
+                image = None
+        if image is None:
+            image = forensics.composited_page_gray(
+                page, dpi=P0B_RENDER_DPI)
+        out.append((page.number, despeckle(image)))
     return out
 
 
