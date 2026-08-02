@@ -503,6 +503,61 @@ def _rank1_values(view):
     return values
 
 
+def _without_native_text_rank1_authority(parsed, authority_values):
+    """Remove uncorroborated native-text authority but keep ordinary reads.
+
+    An adjudicator-note page assigns rank 1 to every labeled field merely by
+    page type.  When its text semantics are not confirmed by the rendered
+    pixels, retain only fields outside the authority payload and downgrade the
+    page to ``unknown`` so those ordinary reads cannot inherit note authority.
+    Non-note pages keep their existing page type and ordinary fields while any
+    manual-correction metadata is removed.
+    """
+    ptype, fields, _ = parsed
+    safe_ptype, safe_fields, safe_notes = _without_rank1_authority(parsed)
+    if ptype != "adjudicator_note":
+        return safe_ptype, safe_fields, safe_notes
+    ordinary_fields = {
+        field: candidate for field, candidate in fields.items()
+        if field not in authority_values
+    }
+    return "unknown", ordinary_fields, safe_notes
+
+
+def _corroborate_native_text_rank1(page, parsed):
+    """Require final viewer pixels to agree with native-text note authority.
+
+    PDF font mappings can make extracted Unicode differ from the glyphs a
+    reviewer sees.  Contrast checks prove that a span paints ink, but not that
+    the ink has the extracted semantics.  Only a native-text page carrying an
+    actual rank-1 finding, correction, or signed field pays for this rendered
+    OCR pass.  Any render, OCR, parse, or semantic ambiguity fails closed.
+    """
+    origin = {
+        "page": int(page.number), "view": "visible_text_layer",
+        "dpi": 0, "pass": "fast",
+    }
+    expected = _rank1_values(_tag_rank1_view(parsed, origin))
+    if not expected:
+        return parsed
+    safe = _without_native_text_rank1_authority(parsed, expected)
+    try:
+        image = forensics.composited_page_gray(page, dpi=250)
+        lines, _ = _ocr_page_with_capture(image, hq=True)
+        if not lines:
+            return safe
+        pixel_parsed = parse_ocr.parse_page(lines)
+        observed = _rank1_values(_tag_rank1_view(pixel_parsed, {
+            "page": int(page.number), "view": "composited_pdf_render",
+            "dpi": 250, "pass": "rank1_corroboration",
+        }))
+        if observed == expected:
+            return parsed
+    except Exception:
+        pass
+    return safe
+
+
 def _composited_rank1_attestation(views):
     """Origin-bound census of every signed value in composited baseline views."""
     values, evidence = {}, {}
@@ -1328,6 +1383,8 @@ def _extract_baseline_state(pdf_path, doc, raw_pdf):
                      if line.strip()]
             skipped, parsed = _accepted(lines)
             _mark_foreign(page.number, skipped)
+            if parsed is not None:
+                parsed = _corroborate_native_text_rank1(page, parsed)
             _add_candidate(parsed, page.number)
             candidate_lines_by_page[page.number] = [t for t, _ in lines]
             if parsed is not None:
