@@ -723,7 +723,8 @@ def _validate_view_event_contract(event, effective_config):
             allowed_sources = {"masked_pdf_render"}
         elif native_enabled:
             allowed_sources = {
-                "composited_pdf_render", "native_full_page_image"}
+                "masked_pdf_render", "composited_pdf_render",
+                "native_full_page_image"}
         else:
             allowed_sources = {"masked_pdf_render"}
         if source not in allowed_sources:
@@ -871,6 +872,29 @@ def _validate_image_view_registry(registry, effective_config,
             and composited_candidate_pages != set(fallback_pages)):
         raise ValueError(
             "native fallback pages differ from composited OCR views")
+
+    # The current two-ledger producer computes its P0-B baseline once, then
+    # records the same physical OCR selection under candidate and baseline
+    # bookkeeping.  That baseline remains active when the independent native
+    # supplement is enabled, so a candidate_ocr masked_pdf_render event is
+    # legitimate only when its baseline twin proves byte-identical pixels and
+    # transforms.  Requiring the twin keeps the additional allowed source from
+    # admitting a fabricated candidate-only masked view.
+    for key, candidate in event_index.items():
+        page, consumer, pass_name, transform = key
+        if (consumer != "candidate_ocr"
+                or candidate["source"] != "masked_pdf_render"):
+            continue
+        baseline = event_index.get(
+            (page, "baseline_ocr", pass_name, transform))
+        shared = (
+            "pass", "transform", "source", "preprocess", "dpi",
+            "rotation_degrees", "shape", "dtype", "pixel_sha256",
+        )
+        if baseline is None or any(
+                candidate[field] != baseline[field] for field in shared):
+            raise ValueError(
+                "image view OCR source is inconsistent with P0-B baseline")
 
     for page in observed_pages:
         page_events = next(

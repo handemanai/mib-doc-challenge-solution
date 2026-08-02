@@ -287,6 +287,37 @@ def test_composited_candidate_ocr_source_is_native_fallback_only():
         _validate_evidence_rows([control], NATIVE_OFF)
 
 
+def test_native_mode_accepts_only_cross_bound_p0b_candidate_ocr_view():
+    """Match the two-ledger receipt's real top-level OCR evidence shape."""
+    row = _evidence("MIB-000001")
+    candidate = _view_event(
+        0, "candidate_ocr", "fast", "selected_ocr_input",
+        "masked_pdf_render", "none", dpi=150,
+        shape=(1650, 1275), digest="a" * 64)
+    baseline = _view_event(
+        1, "baseline_ocr", "fast", "selected_ocr_input",
+        "masked_pdf_render", "none", dpi=150,
+        shape=(1650, 1275), digest="a" * 64)
+    row["image_view_registry"]["pages"] = [{
+        "page": 0, "events": [candidate, baseline],
+    }]
+    _validate_evidence_rows([row], {"MIB_NATIVE_SCAN_OCR": "1"})
+
+    missing_baseline = copy.deepcopy(row)
+    missing_baseline["image_view_registry"]["pages"][0]["events"] = [
+        candidate]
+    with pytest.raises(ValueError, match="P0-B baseline"):
+        _validate_evidence_rows(
+            [missing_baseline], {"MIB_NATIVE_SCAN_OCR": "1"})
+
+    mismatched_baseline = copy.deepcopy(row)
+    mismatched_baseline["image_view_registry"]["pages"][0]["events"][1][
+        "pixel_sha256"] = "b" * 64
+    with pytest.raises(ValueError, match="P0-B baseline"):
+        _validate_evidence_rows(
+            [mismatched_baseline], {"MIB_NATIVE_SCAN_OCR": "1"})
+
+
 def test_native_candidate_fast_ocr_uses_configured_dpi():
     row = _evidence("MIB-000001")
     row["image_view_registry"]["pages"] = [{"page": 0, "events": [
