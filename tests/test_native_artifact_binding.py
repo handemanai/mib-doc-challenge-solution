@@ -17,7 +17,9 @@ from tools.native_artifact_binding import (EFFECTIVE_CONFIG_DEFAULTS,
                                            PIX_ALLOWED_VALUES,
                                            PIX_BASELINE_GUARD_WORLDS,
                                            PIX_FIELD_PAGE_TYPES,
-                                           PIX_GATE_THRESHOLDS, SCHEMA,
+                                           PIX_GATE_THRESHOLDS,
+                                           RUNTIME_INPUT_DIRECTORY_NAME,
+                                           SCHEMA,
                                            _validate_evidence_rows,
                                            binding_identity,
                                            canonical_effective_config,
@@ -829,8 +831,8 @@ def _producer(tmp_path):
     return repo, sha, manifest
 
 
-def _inputs(tmp_path, case_ids=("MIB-000001",)):
-    directory = tmp_path / "inputs"
+def _inputs(tmp_path, case_ids=("MIB-000001",), directory_name="inputs"):
+    directory = tmp_path / directory_name
     directory.mkdir()
     for case_id in case_ids:
         (directory / f"{case_id}.pdf").write_bytes(
@@ -884,7 +886,7 @@ def _write_run_receipt(input_dir, directory, split, config, worker_count,
         "worker_count": worker_count,
         "input_source": {
             "kind": "sorted_pdf_directory",
-            "directory_name": input_dir.name,
+            "directory_name": RUNTIME_INPUT_DIRECTORY_NAME,
         },
         "input_manifest": [{
             "ordinal": entry["ordinal"],
@@ -1044,6 +1046,94 @@ def test_binding_canonicalizes_config_and_rejects_output_or_input_drift(tmp_path
     (inputs / "MIB-000001.pdf").write_bytes(b"changed input bytes")
     with pytest.raises(ValueError, match="live input PDF manifest"):
         verify_binding(binding_path)
+
+
+def test_binding_decouples_runtime_input_mount_from_host_directory_name(
+        tmp_path):
+    repo, sha, manifest = _producer(tmp_path)
+    inputs = tmp_path / "validation"
+    inputs.mkdir()
+    (inputs / "MIB-000001.pdf").write_bytes(b"fixed input bytes")
+    directory = _run_dir(
+        tmp_path, "run", "validation", [_prediction("MIB-000001")],
+        [_evidence("MIB-000001")])
+    command = _binding_command(
+        repo, sha, manifest, inputs, directory, "validation")
+
+    result = _run(command)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("source", [
+    None,
+    {},
+    {"kind": "ordered_list", "directory_name": "input"},
+    {"kind": "sorted_pdf_directory", "directory_name": ""},
+    {"kind": "sorted_pdf_directory", "directory_name": "validation"},
+    {"kind": "sorted_pdf_directory", "directory_name": "../input"},
+    {"kind": "sorted_pdf_directory", "directory_name": "input",
+     "path": "/input"},
+])
+def test_binding_rejects_noncanonical_runtime_input_source(tmp_path, source):
+    repo, sha, manifest = _producer(tmp_path)
+    inputs = tmp_path / "validation"
+    inputs.mkdir()
+    (inputs / "MIB-000001.pdf").write_bytes(b"fixed input bytes")
+    directory = _run_dir(
+        tmp_path, "run", "validation", [_prediction("MIB-000001")],
+        [_evidence("MIB-000001")])
+    command = _binding_command(
+        repo, sha, manifest, inputs, directory, "validation")
+    receipt = directory / "run-receipt-validation.json"
+    payload = json.loads(receipt.read_text())
+    if source is None:
+        payload.pop("input_source")
+    else:
+        payload["input_source"] = source
+    receipt.write_text(json.dumps(payload))
+
+    result = _run(command)
+    assert result.returncode != 0
+    assert ("unexpected or missing keys" in result.stderr
+            or "fixed /input mount" in result.stderr)
+
+
+def test_portable_input_source_still_rejects_changed_bytes_and_order(tmp_path):
+    repo, sha, manifest = _producer(tmp_path)
+    inputs = tmp_path / "validation"
+    inputs.mkdir()
+    first = inputs / "MIB-000001.pdf"
+    first.write_bytes(b"fixed one")
+    (inputs / "MIB-000002.pdf").write_bytes(b"fixed two")
+    case_ids = ["MIB-000001", "MIB-000002"]
+    directory = _run_dir(
+        tmp_path, "run", "validation",
+        [_prediction(case_id) for case_id in case_ids],
+        [_evidence(case_id) for case_id in case_ids])
+    receipt = _write_run_receipt(
+        inputs, directory, "validation", {}, 1, sha, manifest)
+
+    accepted = _run(_binding_command(
+        repo, sha, manifest, inputs, directory, "validation",
+        output=directory / "accepted.json", receipt=receipt))
+    assert accepted.returncode == 0, accepted.stderr
+
+    first.write_bytes(b"changed!!")
+    changed = _run(_binding_command(
+        repo, sha, manifest, inputs, directory, "validation",
+        output=directory / "changed.json", receipt=receipt))
+    assert changed.returncode != 0
+    assert "producer identity differs" in changed.stderr
+    first.write_bytes(b"fixed one")
+
+    payload = json.loads(receipt.read_text())
+    payload["input_manifest"] = list(reversed(payload["input_manifest"]))
+    receipt.write_text(json.dumps(payload))
+    reordered = _run(_binding_command(
+        repo, sha, manifest, inputs, directory, "validation",
+        output=directory / "reordered.json", receipt=receipt))
+    assert reordered.returncode != 0
+    assert "input manifest differs from bound inputs" in reordered.stderr
 
 
 def test_preflight_generator_binds_exact_run_identity_and_refuses_overwrite(
@@ -1266,7 +1356,7 @@ def test_actual_producer_completion_receipt_binds_without_running_ocr(
         monkeypatch.setenv(key, "1")
 
     repo, sha, manifest = _producer(tmp_path)
-    inputs = _inputs(tmp_path)
+    inputs = _inputs(tmp_path, directory_name="input")
     entries = input_manifest(sorted(inputs.glob("*.pdf")))
     effective = canonical_effective_config({}, environment={})
     input_identity = [{key: entry[key] for key in (
@@ -1335,7 +1425,7 @@ def test_unequal_size_multi_pdf_order_matches_preflight_runtime_and_binder(
         monkeypatch.setenv(key, "1")
 
     repo, sha, manifest = _producer(tmp_path)
-    inputs = tmp_path / "inputs"
+    inputs = tmp_path / "input"
     inputs.mkdir()
     sizes = {"MIB-000001": 100, "MIB-000002": 20, "MIB-000003": 1}
     for case_id, size in sizes.items():

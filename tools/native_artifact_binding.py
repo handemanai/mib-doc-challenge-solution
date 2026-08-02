@@ -27,6 +27,7 @@ SCHEMA = "mib-native-artifact-binding-v3"
 RUNTIME_MANIFEST_SCHEMA = "mib-runtime-manifest-v1"
 RUN_IDENTITY_SCHEMA = "mib-run-identity-v1"
 RUN_RECEIPT_SCHEMA = "mib-run-receipt-v2"
+RUNTIME_INPUT_DIRECTORY_NAME = "input"
 SHA1_RE = re.compile(r"[0-9a-f]{40}")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}")
@@ -556,8 +557,10 @@ def _validate_run_receipt(receipt, entries, effective_config,
     source = receipt.get("input_source")
     if not isinstance(source, dict) or set(source) != {
             "kind", "directory_name"} or source.get("kind") != \
-            "sorted_pdf_directory" or not source.get("directory_name"):
-        raise ValueError("run receipt input source is malformed")
+            "sorted_pdf_directory" or source.get("directory_name") != \
+            RUNTIME_INPUT_DIRECTORY_NAME:
+        raise ValueError(
+            "run receipt input source must identify the fixed /input mount")
     if receipt.get("input_manifest") != _receipt_input_identity(entries):
         raise ValueError("run receipt input manifest differs from bound inputs")
     input_manifest_sha256 = canonical_sha256(_input_identity(entries))
@@ -1479,9 +1482,6 @@ def verify_binding(path, expected_identity=None):
         resolved["evidence"], expected_run_identity)
     if binding["worker_count"] != workers:
         raise ValueError("bound worker count differs from run receipt")
-    if source.get("kind") != "sorted_pdf_directory" or \
-            Path(source["path"]).name != receipt["input_source"]["directory_name"]:
-        raise ValueError("run receipt input source differs from binding source")
 
     prediction_rows, prediction_ids = _jsonl_case_ids(resolved["predictions"])
     evidence_rows, evidence_ids = _jsonl_case_ids(resolved["evidence"])

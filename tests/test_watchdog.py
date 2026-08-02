@@ -392,7 +392,7 @@ def test_producer_receipt_binds_identity_config_inputs_split_and_nonce(
             monkeypatch.delenv(key, raising=False)
     for key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
         monkeypatch.setenv(key, "1")
-    input_dir = tmp_path / "dev"
+    input_dir = tmp_path / "input"
     input_dir.mkdir()
     pdf = input_dir / "MIB-000001.pdf"
     pdf.write_bytes(b"exact test input")
