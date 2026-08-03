@@ -5,6 +5,16 @@ performance register is a historical research log and mentions private working
 receipts that are not published; those absent receipts are not offered as proof
 of the final release.
 
+Use only the sections relevant to your review:
+
+| Question | Section |
+| --- | --- |
+| Can the exact submission be rebuilt and run? | 1 and 7 |
+| How does a PDF become a decision? | 2 |
+| What prevents hidden or forged evidence from controlling the result? | 3 and 4 |
+| Can one pathological PDF invalidate the 5,000-case batch? | 5 |
+| What was actually tested? | 6 |
+
 ## 1. Run the scoring contract
 
 From the solution checkout, set `CHALLENGE_DIR` to an absolute checkout of the
@@ -36,9 +46,8 @@ python3 "$CHALLENGE_DIR/scripts/validate_submission.py" \
 
 The scoring image copies the runtime source/model directories and entry scripts;
 license and notice files are also included. Audit and fitting tools are not part
-of the inference image. The model and dependency inventory is documented in the
-source-bound
-[`NOTICE.md`](https://github.com/handemanai/mib-doc-challenge-solution/blob/4313d28b34abc4cef4c89586060f4d3d34848c88/NOTICE.md).
+of the inference image. The model and dependency inventory is documented in
+[`NOTICE.md`](../NOTICE.md).
 
 ## 2. Trace one decision
 
@@ -126,10 +135,11 @@ blanket byte-identity claim about every ledger or confidence field.
   covers direct embedded-scan revalidation and binder-consistent rank-1
   sanitization.
 
-The one development false approval is documented in
+The one public-training false approval is documented in
 [`experiments/CFA-MIB-000865-visible-forensic.md`](../experiments/CFA-MIB-000865-visible-forensic.md).
 That document establishes absence across the channels actually audited; it does
-not claim metaphysical irreducibility or private-set validation.
+not claim that the labeled value is impossible to recover by every method, or
+that the result predicts private-set performance.
 
 ## 5. Inspect completion and runtime controls
 
@@ -186,10 +196,11 @@ AMD64 cases reached both the per-case timeout and retry-failure path and emitted
 conservative fallback rows. The ARM64 fee-reader panel reproduced its accepted
 behavior byte-for-byte.
 
-## 7. Final identity check
+## 7. Check release identity
 
 The release documents record the exact source, prediction, and run-result
-identities. This check must print no matches:
+identities. First check that no release placeholders remain; this command must
+print no matches:
 
 ```bash
 rg -n 'FINAL_(RUNTIME_SOURCE_SHA|PREDICTIONS_SHA256|VALIDATION_[A-Z0-9_]+)' \

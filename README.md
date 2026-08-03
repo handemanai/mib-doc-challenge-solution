@@ -5,15 +5,20 @@ the required applicant record, and emits `APPROVED`, `DENIED`, or
 `NEEDS_REVIEW` with calibrated confidence and an optional evidence ledger.
 
 The system is designed around source authority rather than OCR alone. It keeps
-visible and hidden PDF content separate, can reason over two physical views when
-a raw scan is viewer-authorized, binds evidence to the active case, and makes
-decisions through a deterministic policy. Expected-value analysis is used
-offline to assess proposed policy changes; it is not a production decision
-layer. Confidence is computed after adjudication.
+visible and hidden content separate, binds evidence to the active case, and
+uses an embedded scan directly only when it can prove that the scan is the view
+presented to the reader. Deterministic policy makes the decision; confidence is
+computed afterward.
 
-[`MEMO.md`](MEMO.md) explains the approach and trade-offs.
-[`docs/REVIEWER_GUIDE.md`](docs/REVIEWER_GUIDE.md) maps the public claims to
-tracked code, tests, and artifacts.
+Start with the document that matches your purpose:
+
+- [`MEMO.md`](MEMO.md) gives the short account of the approach, results, and
+  failure boundary.
+- [`SUBMISSION.md`](SUBMISSION.md) records the exact submitted artifact and the
+  command used to reproduce it.
+- [`docs/REVIEWER_GUIDE.md`](docs/REVIEWER_GUIDE.md) maps claims to tracked code,
+  tests, and artifacts.
+- [`NOTICE.md`](NOTICE.md) records dependency licenses and model provenance.
 
 ## Reproduce the submission contract
 

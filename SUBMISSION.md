@@ -3,11 +3,10 @@
 - **Solution repository:** <https://github.com/handemanai/mib-doc-challenge-solution>
 - **Candidate:** handemanai
 
-This is an offline, CPU-only document-adjudication system. It recovers the nine
-required fields from adversarial PDF packets, applies deterministic policy, and
-emits `APPROVED`, `DENIED`, or `NEEDS_REVIEW` with calibrated confidence. It
-contains no LLM, VLM, cloud OCR, network service, API key, or component that
-follows document instructions.
+This repository contains the offline, CPU-only system that produced the
+submitted validation predictions. It combines OCR and computer vision with a
+deterministic adjudication policy; it does not use an LLM, cloud service, or
+network access at inference time.
 
 ## Final artifact
 
@@ -29,34 +28,11 @@ were zero terminal failures, governor level 0 for every row, and no
 batch-deadline backfill. The official validator accepted all 5,000 records, and
 the full source/runtime/input/output binding and strict evidence census passed.
 
-## Approach and safety boundaries
-
-- **Visible evidence controls decisions.** Hidden spans are masked before image
-  enhancement and OCR. The runtime does not parse hidden verdict direction;
-  hidden values never populate fields or support approval or denial. Generic
-  hidden-content metadata may only lower trust, narrow to review, or contribute
-  to calibration.
-- **Evidence remains source-bound.** Native text, masked renders, targeted pixel
-  readers, and an authorized raw-scan view remain separate channels. A direct
-  scan read must be bound to the page a viewer sees; otherwise that channel
-  abstains or uses a fresh composited render.
-- **Authority is fail-closed.** Signed-note and stamp findings require an
-  accepted visible surface. Native-text authority also requires exact 250-DPI
-  raster/OCR corroboration. Foreign-case pages are quarantined, conflicts remain
-  explicit, and ambiguous cancellation cannot create an approval.
-- **Policy precedes confidence.** Deterministic rules adjudicate the emitted
-  fields first. An out-of-fold logistic/isotonic model then estimates confidence
-  from evidence quality. Expected-value analysis is development-only and does
-  not route production decisions.
-- **Completion is conservative.** Per-case deadlines, a parent heartbeat,
-  worker recycling after 48 durable cases, atomic checkpoints, bounded retries,
-  a batch governor, and a finalization reserve prevent one pathological PDF from
-  invalidating the batch. Anything unresolved becomes a valid `NEEDS_REVIEW`
-  row.
-
-Prediction code and model artifacts contain no validation-case answer table or
-case-specific runtime lookup. The container accepts arbitrary mounted input and
-output paths and ships no challenge labels or validation data.
+The container accepts arbitrary mounted input and output paths. It ships no
+challenge labels, validation data, validation-case answer table, or
+case-specific runtime lookup. The approach and its safety boundaries are
+explained in [`MEMO.md`](MEMO.md); the claim-by-claim verification map is in
+[`docs/REVIEWER_GUIDE.md`](docs/REVIEWER_GUIDE.md).
 
 ## Reproduce and validate
 
@@ -115,11 +91,10 @@ fields differed on all eight and two AMD64 cases exhausted timeout and retry
 before emitting conservative fallbacks. No full-batch AMD64 throughput or
 cross-platform row-identity claim is made.
 
-I am a practicing surgeon, not a software engineer. The agents did all of the
-implementation, testing, analysis, and drafting. `MEMO.md` explains the thesis,
-my role, and how I judged the result.
-
-[`MEMO.md`](MEMO.md) gives the technical rationale and remaining failure
-boundary. [`docs/REVIEWER_GUIDE.md`](docs/REVIEWER_GUIDE.md) maps claims to
-public source and tests. [`NOTICE.md`](NOTICE.md) records dependency licenses,
-model provenance, and the non-hash-locked rebuild boundary.
+I am a practicing surgeon, not a software engineer. I cannot read or write
+code. I entered the challenge to test whether curiosity and persistence were
+enough to compete when AI wrote the code. I kept pushing, asked skeptical
+questions, and demanded repeated review; the agents did all of the
+implementation, testing, analysis, and drafting. [`MEMO.md`](MEMO.md) gives the
+full author note and technical rationale. [`NOTICE.md`](NOTICE.md) records
+dependency licenses, model provenance, and the non-hash-locked rebuild boundary.

@@ -110,20 +110,12 @@ validation data or case-keyed answers.
 | `confusion_costs.json` | Character-level edit costs (ins/del/sub) | OCR confusion pairs mined from our own output |
 | `transducer_enc.int8.onnx`, `transducer_dec.int8.onnx`, `transducer_vocab.json` | OCR-correction transducer, trained from scratch by us; **ships disabled** (`MIB_TRANSDUCER=0`) | mined + synthetic confusion pairs |
 
-### A note on `pix_bank.npz` keys
+### `pix_bank.npz` key scope
 
-The bank is keyed `v|{label}|{value}|{i}` — a crop of the pixels that spell
-`{value}` under field label `{label}`. No key contains a case ID, and the
-artifact holds templates for exactly the ten field labels the decoder queries.
-
-This is worth stating explicitly because it was not always true. Because
-`tools/pixharvest.py` harvests every field label it can verify, earlier revisions
-also banked crops for the `Case ID:` field, whose *value* is a case ID string —
-228 entries covering 177 training case IDs. They were harvest byproduct and
-unreachable at run time (no code path queries the `Case ID:` label, and
-`case_id` is taken from the PDF filename stem, never from a pixel match), but a
-shipped artifact that greps as a per-PDF table is not worth defending, so they
-were removed. Dropping them is output-neutral, verified by byte-identical
-extraction states over a 20-case runtime stress sample.
+The bank is keyed `v|{label}|{value}|{i}`: a crop of the pixels that spell
+`{value}` under field label `{label}`. It contains templates for exactly the ten
+field labels queried by the decoder. No archive key contains a case ID, and the
+archive has no `Case ID` field entries. The runtime obtains `case_id` from the
+PDF filename stem rather than from a pixel match.
 
 See `MEMO.md` for the decoder's actual role.
