@@ -1,135 +1,124 @@
 # MIB Doc Challenge — Technical Memo
 
-On a fixed 799/201 split of the public training set, with the holdout inspected
-only at milestones, the release lineage
-measured **129.52 on development and 126.46 on holdout**, with zero catastrophic
-false approvals on holdout and one on development.
+The offline, CPU-only final runtime scored **128.8990/150** on the complete
+1,000-case public training set: 66.32 classification, 45.3422 extraction, and
+17.2368 calibration, with one documented catastrophic false approval. An earlier
+internal fixed 799/201 checkpoint measured 129.52 on development and 126.46 on
+holdout, with zero holdout catastrophic false approvals. It uses no LLM or VLM,
+has no instruction-following component, and does not treat arbitrary document
+prose as executable commands.
 
-## Approach
+## System design
 
-The offline, CPU-only system extracts nine fields
-from each PDF, applies deterministic evidence and policy rules, and then computes
-a calibrated confidence for the resulting decision. Expected-value calculations
-were used offline to compare candidate policy changes against the competition's
-scoring matrix; they do not choose production decisions.
+The pipeline separates evidence recovery from adjudication. An optional ledger
+records final fields, source and rank, conflicts, fusion, decisions, and attempts.
 
-**Forensics before OCR.** In 216 of 1,000 training packets, the PDF contains a
-fake answer key as white-on-white, off-crop, or otherwise hidden text. The system
-classifies spans by render mode, opacity, colour, size, crop position, and draw
-order, then removes hidden spans before raster enhancement. The hidden answer-key
-verdict is not parsed into fields or used to change adjudication. Hidden-span
-presence remains audit provenance and a confidence feature. Masking prevents
-contrast enhancement from resurrecting invisible text. With no LLM, VLM, or
-other instruction-following component, prompt following is not a runtime path;
-evidence poisoning remains and is handled by page binding, source ranking, and
-review gates.
+**1. Quarantine hidden content.** Public packets contain non-visible text,
+including planted answer-key material. The runtime classifies PyMuPDF-exposed
+spans by render mode,
+opacity, colour, crop, font context, clipping, transparency, geometry, and paint
+order. For the composited baseline, untrusted regions are overwritten before
+enhancement or OCR, so contrast repair cannot resurrect them. Direct embedded
+scan decoding instead requires viewer binding and otherwise falls back to a new
+composited render. The runtime does not parse hidden verdict direction. Hidden
+values never populate fields or support approval or denial; pattern metadata may
+only narrow to review or affect calibration.
 
-**OCR and structured extraction.** RapidOCR uses an ONNX English mobile
-recognizer at a low-resolution fast path. Packets still missing deny-relevant
-fields can receive a higher-resolution pass because the six-second constraint is
-an average across PDFs. Native text pages bypass OCR. Values are normalized and
-snapped to legal vocabularies where appropriate; margin and agreement across
-sources become quality features. Template-specific readers recover evidence
-whole-page OCR misses. Their authority is asymmetric:
-readers allowed to be aggressive can emit only adverse evidence, while
-approval-adjacent reads require positive evidence. For example, “paid” is
-accepted only when the region where the `un` in “unpaid” would appear is visibly
-clean.
+**2. Read visible evidence through independent channels.** RapidOCR runs
+low-resolution first and escalates when decision-relevant fields remain missing.
+NFKC normalization, closed vocabularies, and plausibility checks constrain
+outputs. Manual cancellation requires a viewer-visible word and stroke, and
+negated authority is rejected. Accepted raw authority spellings remain bound to
+their canonical values so normalization aliases cannot evade matching strikes.
+Sanitization rebuilds rank-1 values, evidence, and conflicts together before
+strict binding. Ambiguous adverse cancellation can only narrow to review. This
+is conservative token/field provenance, not exact occurrence or page
+attribution. The baseline pixel observer decodes a raw embedded scan only when
+exact resource, geometry, crop/rotation, paint, and compositing checks bind its
+pixels to the viewer's page; otherwise it uses a new composited render. The
+independent native ledger abstains unless raw-scan authorization succeeds.
+Fusion may corroborate or narrow, but cannot create approval alone.
 
-**Two physical views, two ledgers.** Scanned packets also receive a
-native-resolution pass over embedded scan images. It is extracted and
-adjudicated independently from the composited PDF view. A frozen selector can
-replace a weak field with stronger native evidence, but fusion never creates an
-approval. Explicit native adverse evidence can narrow `NEEDS_REVIEW` to `DENIED`;
-otherwise the baseline decision remains authoritative. Conflicting rank-1 note
-views force review.
-
-**Deterministic adjudication, then confidence.** The production policy combines
-the field manual with public-training rules that survived held-out checks. Given
-true fields, it reproduces 97.3% of training adjudications with zero
-APPROVED/DENIED confusions. A post-fusion check re-adjudicates every approval
-against the exact emitted fields. Ordinary contradictions narrow to
-`NEEDS_REVIEW`. The deliberate exception is an exact, case-bound, signed rank-1
-adjudicator finding: the manual gives that evidence higher authority than
-ordinary fields, so a conflicting approval can remain approved and the conflict
-is recorded. Rank-1 findings may control adjudication while conflicts remain
-recorded; emitted fields change only when the note contains an explicit field
-correction.
-Only after this policy path is fixed does the logistic/isotonic calibrator compute
-confidence from evidence quality and decision-path features.
+**3. Adjudicate deterministically, then calibrate.** Field-manual rules include
+label-supported revoked-sponsor and embargo-world exceptions. Expected value
+compares policies offline, not in production. Approvals are checked against their
+emitted fields. A rank-1 finding may override lower-rank evidence only on an
+accepted note surface; native-text authority additionally requires exact
+250-DPI composited raster/OCR corroboration. Foreign-case pages are quarantined;
+native-only authority requires an exact body Case ID. Conflicts are recorded,
+and fields change only with explicit correction text.
+Afterward, an out-of-fold logistic/isotonic model calibrates confidence from
+evidence quality and decision path.
 
 ## What measurement changed
 
-The largest residual initially looked model-shaped. A direct census instead
-showed that 31–41% of fallbacks already had the true text in the visible OCR
-stream: the parser, not the recognizer, was failing. Six deterministic parser
-repairs were worth about 2.4 points.
+A historical internal census showed 31–41% of fallbacks already contained the
+true value in visible OCR: the parser had failed. Six repairs added about 2.4
+development points. A
+learned hedge resolver produced 32 new false approvals out of fold; opening
+approval with missing flags created 19. A 2.6-million-parameter OCR-correction
+model changed score only +0.04 on development and -0.05 on holdout, so it ships
+disabled. Joint name-grammar decoding shipped because it improved garbled names
+without adding a model or changing adjudication risk.
 
-An ML hedge resolver scored four
-points worse out of fold and created 32 catastrophic false approvals. An
-approval expansion for otherwise-clean cases with unread flags had positive raw
-expected value but created 19 systematic false approvals, so it was rejected.
-A 2.6-million-parameter OCR correction model improved isolated string pairs but
-measured +0.04 on development and -0.05 on holdout; it ships disabled. These
-experiments are why expected value remains an evaluation tool instead of a
-production decision layer.
+## Failure boundary and robustness
 
-## Robustness and runtime
+One public-training false approval remains, MIB-000865. The visible intake scan
+reports XW-2 while the label is TRANSIT-7; the labelled value was absent from the
+audited visible-evidence channels. The documented broad review-only
+corroboration gate removed this error but demoted four correct approvals and
+reduced classification score, so I retained the general policy rather than
+specialize around a case identity or hidden surface. The larger
+residual is missing evidence: when a packet has no decisive flags surface,
+`NEEDS_REVIEW` is preferable to guessing from generator priors.
 
-The committed red-team corpus covers hidden and off-crop text, render-mode-3,
-zero opacity, hidden optional-content layers, under-image text, microtext,
-visible decoys, sample-denial watermarks, and QR instructions. Tests require
-hostile packets to preserve the clean twin's fields and adjudication, except
-where visible evidence is intentionally absent, and prevent hidden tokens from
-entering extracted fields.
+A 12-case synthetic adversarial corpus covers hidden or decoy content plus clean
+controls. Its output was byte-identical across
+two native ARM64 runs and one emulated AMD64 run, with 12 valid rows, no missing
+cases, and no leaked poison tokens. The runtime invokes no barcode or QR-decoding
+path. Per-case
+deadlines, a parent heartbeat watchdog, worker recycling, atomic checkpoints,
+and a batch governor protect completion. The supervisor reserves finalization
+time, signals all workers before a shared bounded reap, preserves durable state,
+and atomically emits conservative rows for anything unresolved. Governor level
+0 is tested as output-equivalent to the ungoverned path. Up to 128 failed-case
+candidates may receive one fresh-process retry, subject to an unchanged
+3,600-second retry wall and the finalization reserve. Full-batch byte identity is
+not claimed across scheduling, governor, architecture, or timeout boundaries.
+The pinned suite reported 1,183 passed, 106 controlled skips, and zero failures.
 
-Each PDF has a SIGALRM deadline. A parent heartbeat watchdog replaces a worker
-hung below Python's signal layer, and workers actively recycle after 48 completed
-cases to avoid observed native-library lifetime failures; completed states are
-flushed and `fsync`ed first. A batch governor estimates finish time and, only on
-hardware trending beyond the limit, reduces future OCR work in measured stages.
-At level 0 it is output-identical to the ungoverned path. When the governor is
-inactive—or its level and all runtime conditions are fixed—repeat runs are
-deterministic. Deep timeout-boundary stress can change which cases receive a
-reduced path, so determinism is not claimed across changing schedules.
-
-The last completed scoring-contract measurement used four workers: 3.43 seconds
-per PDF, about 17,100 seconds for 5,000 PDFs, 3.3 GiB peak RSS, a 0.30 GiB image,
-and 12 MB of model artifacts. The uninterrupted validation run completed in 4
-hours 4 minutes with zero timeouts, retries, or governor engagements. It ran on
-Apple silicon; a `linux/amd64` image build and sample output were separately
-checked. No cross-architecture speed equivalence is claimed.
-
-## Failure boundary
-
-The development false approval, MIB-000865, visibly prints `Visa Class: XW-2`
-while the label says `TRANSIT-7`. The true value was absent across the audited
-visible-evidence channels. Demanding extra visa corroboration would hedge 26
-approvals, 25 correct, to prevent this one. I kept the evidence-respecting policy
-and documented the limitation rather than fitting a case identity or hidden
-surface. The larger residual is missing evidence: many packets contain no flags
-surface at all, for which `NEEDS_REVIEW` is the intended action rather than a
-guess from generator priors.
+Under the official 4-vCPU, 8-GiB, no-network contract, the final native-ARM64 run
+completed 5,000 packets in **19,186.18 seconds**
+(**3.8372 seconds/PDF**) with **82 fresh-process retries, all recovered**
+(81 watchdog exits with missing primary state and one primary per-case timeout),
+zero terminal failures, governor level 0 throughout, and no batch-deadline backfill, from source
+`4313d28b34abc4cef4c89586060f4d3d34848c88`; full source/runtime manifest
+binding passed. On an eight-case OCR-sensitive panel, adjudications matched
+across architectures; fields differed on all eight. Two emulated AMD64 cases
+also exhausted timeout and retry, producing conservative fallbacks. The ARM64
+fee-reader panel was unchanged from the prior producer. No full AMD64 throughput
+or row-identity claim is made. The AMD64
+image is 316,434,546 bytes
+(`sha256:f6447a9720c0ca52616d83f245ecb804d418b94bd503f8fe57fe551a3e36f95d`);
+ARM64 is 286,493,358 bytes
+(`sha256:21515e59b31fecaed2eb9983527c0751079abc9c9d3c7711142214c523bdae3f`).
+Models total 28,750,436 bytes; the largest is 10,857,958 bytes.
 
 ## With another week
 
-I would extend the Reason-line reader for the four tracked rasterized notes it
-currently skips, but only behind the same case-binding and zero-regression gates;
-build a distinct faint-ink restoration view for human-legible note text below
-the current OCR signal floor; and expose per-field confidence rather than only a
-row-level value. I would also rerun a larger grouped perturbation campaign across
-page types and damage modes. I would not add a learned `NEEDS_REVIEW` resolver or
-any case-identity prior: both substitute generator regularities for missing
-visible evidence, and the existing out-of-fold experiments show the false-
-approval cost.
+I would test rasterized “Reason” lines and faint-ink restoration; expose
+per-field confidence; and reproduce on native x86 hardware. Each change would
+face held-out, zero-new-false-approval promotion gates.
 
-## A note on the author
+## Author note
 
-I am a practicing surgeon, not a software engineer, and I am not entering this
-competition as a job application. I wanted to test honestly how far one person
-could take agentic coding on a difficult, adversarial problem. AI wrote nearly
-all of the code. I owned the problem framing, evidence standards, experiment
-design, promotion gates, and final decisions: what counted as trustworthy,
-which shortcuts were unacceptable, and when a measured gain was not worth its
-failure mode. That division of labour is part of the experiment, and I want the
-submission to be evaluated with it stated plainly.
+I am a practicing surgeon, not a software engineer, and I am not seeking a job
+through this challenge. I directed the work through agentic AI, which wrote
+nearly all of the code. I evaluated it through behavioral tests, artifacts, and
+failure analysis rather than claiming conventional line-by-line authorship. I
+set the objective and threat model, chose what could count as evidence, defined
+the promotion gates, directed the failure analyses, and made the final calls
+about which measured gains were too unsafe or brittle to ship. The AI produced
+the implementation; I own the experimental design, skepticism, trade-offs, and
+submission decisions. That division of labour is part of the experiment, and I
+would rather disclose it plainly than imply conventional authorship.
