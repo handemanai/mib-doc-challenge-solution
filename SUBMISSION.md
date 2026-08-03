@@ -115,12 +115,9 @@ fields differed on all eight and two AMD64 cases exhausted timeout and retry
 before emitting conservative fallbacks. No full-batch AMD64 throughput or
 cross-platform row-identity claim is made.
 
-I am a practicing surgeon, not a software engineer. I entered this challenge to
-ask how far I could get by directing coding agents when I do not know how to
-read or write code. I spent my time asking skeptical questions and pushing the
-agents to review and re-review their work. Beyond that, I tried to stay out of
-their way. The agents did all of the implementation, testing, analysis, and
-drafting.
+I am a practicing surgeon, not a software engineer. The agents did all of the
+implementation, testing, analysis, and drafting. `MEMO.md` explains the thesis,
+my role, and how I judged the result.
 
 [`MEMO.md`](MEMO.md) gives the technical rationale and remaining failure
 boundary. [`docs/REVIEWER_GUIDE.md`](docs/REVIEWER_GUIDE.md) maps claims to
