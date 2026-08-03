@@ -103,14 +103,62 @@ def test_inert_during_warmup_even_at_terrible_pace(tmp_path):
 
 def test_fast_hardware_never_engages(tmp_path):
     gov = _governor(tmp_path)
-    # 3 s/case toward ~15,000s, far under the ~24,840s target
+    # 3 s/case toward ~15,000s, far under the ~23,340s target
     assert _feed(gov, pace=3.0, upto=1000) == 0
     assert not gov.path.exists()
 
 
+def test_observed_early_projection_noise_does_not_change_quality(tmp_path):
+    """Reproduce the rejected release run's exact hairline trigger point."""
+    gov = _governor(tmp_path)
+    completed = 618
+    elapsed = 2563.0
+    projected = gov.target + 17.0  # observed 23,357 vs 23,340 seconds
+    recent_cases = PREDICT_MODULE.GOVERNOR_WINDOW
+    recent_pace = ((projected - elapsed) / (gov.total - completed))
+    early_cases = completed - recent_cases
+    early_pace = ((elapsed - recent_cases * recent_pace) / early_cases)
+    now = 0.0
+    for n in range(1, completed + 1):
+        now += early_pace if n <= early_cases else recent_pace
+        level = gov.update(n, now=now)
+    assert now == pytest.approx(elapsed)
+    assert level == 0
+    assert not gov.path.exists()
+
+
+@pytest.mark.parametrize("ratio", [1.001, 1.019])
+def test_level_one_margin_absorbs_bounded_projection_noise(tmp_path, ratio):
+    gov = _governor(tmp_path)
+    pace = gov.target * ratio / gov.total
+    assert _feed(gov, pace,
+                 gov.warmup + PREDICT_MODULE.GOVERNOR_WINDOW) == 0
+    assert not gov.path.exists()
+
+
+def test_sustained_real_overload_still_engages_level_one(tmp_path):
+    gov = _governor(tmp_path)
+    pace = gov.target * 1.03 / gov.total
+    assert _feed(gov, pace,
+                 gov.warmup + PREDICT_MODULE.GOVERNOR_WINDOW) == 1
+    assert gov.path.read_text().strip() == "1"
+
+
+def test_level_one_margin_preserves_hard_batch_headroom(tmp_path):
+    gov = _governor(tmp_path, total=5000)
+    level_one_up = next(
+        threshold for threshold, level in PREDICT_MODULE.GOVERNOR_UP
+        if level == 1)
+    full_quality_ceiling = gov.target * level_one_up
+    headroom = (PREDICT_MODULE.BATCH_LIMIT_SECS - full_quality_ceiling
+                - PREDICT_MODULE.RETRY_BUDGET_SECS
+                - PREDICT_MODULE.FINALIZE_RESERVE_SECS)
+    assert headroom >= PREDICT_MODULE.BATCH_LIMIT_SECS * 0.08
+
+
 def test_slow_hardware_escalates_and_publishes(tmp_path):
     gov = _governor(tmp_path)
-    # 7 s/case projects ~35,000s against a ~24,840s target -> deep level
+    # 7 s/case projects ~35,000s against a ~23,340s target -> deep level
     level = _feed(gov, pace=7.0, upto=600)
     assert level >= 2
     assert gov.path.read_text().strip() == str(level)

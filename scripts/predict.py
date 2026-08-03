@@ -93,7 +93,13 @@ GOVERNOR_WINDOW = 200                           # recent-pace window, completion
 GOVERNOR_TARGET_FRACTION = 0.9
 GOVERNOR_TARGET_FLOOR_FRACTION = 0.7            # small-batch reserve floor
 GOVERNOR_SECS_PER_PDF = 6.0                     # the challenge's per-PDF budget
-GOVERNOR_UP = ((1.70, 4), (1.35, 3), (1.12, 2), (1.00, 1))
+# Leave a narrow measurement-noise band before level 1.  Recent-window
+# projection deliberately reacts to the size-sorted corpus, but a sub-2%
+# transient is not evidence that the batch is in danger: even at this ceiling,
+# the full retry and finalization reserves still leave more than 8% of the
+# official 30,000-second hard limit unused.  Deeper overload thresholds remain
+# unchanged so a genuinely slow evaluator still sheds work promptly.
+GOVERNOR_UP = ((1.70, 4), (1.35, 3), (1.12, 2), (1.02, 1))
 GOVERNOR_DOWN = {1: 0.95, 2: 1.06, 3: 1.28, 4: 1.60}
 GOVERNOR_MAX_LEVEL = max(level for _, level in GOVERNOR_UP)
 
