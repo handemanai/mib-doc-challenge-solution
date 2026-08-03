@@ -138,7 +138,7 @@ def test_level_one_margin_absorbs_bounded_projection_noise(tmp_path, ratio):
 
 def test_sustained_real_overload_still_engages_level_one(tmp_path):
     gov = _governor(tmp_path)
-    pace = gov.target * 1.03 / gov.total
+    pace = gov.target * 1.021 / gov.total
     assert _feed(gov, pace,
                  gov.warmup + PREDICT_MODULE.GOVERNOR_WINDOW) == 1
     assert gov.path.read_text().strip() == "1"
