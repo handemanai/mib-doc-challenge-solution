@@ -116,13 +116,11 @@ before emitting conservative fallbacks. No full-batch AMD64 throughput or
 cross-platform row-identity claim is made.
 
 I am a practicing surgeon, not a software engineer. I participated in this
-challenge to test the capabilities of agentic coding. I directed the agents by
-setting the priorities, asking them to research unfamiliar questions, requiring
-repeated skeptical reviews, and spending a great deal of time pushing them to
-look for hidden evidence, document traps, unsafe approvals, and brittle
-improvements. I asked questions, challenged conclusions, and decided what
-evidence was strong enough to act on. The agents did all of the implementation,
-testing, analysis, and drafting.
+challenge to test the capabilities of agentic coding. I spent much of my time
+doing what comes naturally to me as a surgeon: staying curious, remaining
+skeptical, and double-checking the work. Beyond that, I tried to stay out of the
+agents' way and let them work. They did all of the implementation, testing,
+analysis, and drafting.
 
 [`MEMO.md`](MEMO.md) gives the technical rationale and remaining failure
 boundary. [`docs/REVIEWER_GUIDE.md`](docs/REVIEWER_GUIDE.md) maps claims to
