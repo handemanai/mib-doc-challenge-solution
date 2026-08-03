@@ -157,6 +157,12 @@ and one emulated AMD64 run. A changing governor schedule or deep
 timeout-boundary stress may send different cases through reduced OCR work, so
 full-batch cross-schedule byte identity is not claimed.
 
+The accepted native-ARM64 release run used the official 4-vCPU, 8-GiB,
+no-network contract and completed all 5,000 validation PDFs in **19,186.18
+seconds** (**3.8372 seconds/PDF**). It emitted 5,000 valid rows with zero
+missing, recovered all 82 fresh-process retries, recorded zero terminal
+failures, remained at governor level 0, and used no batch-deadline backfill.
+
 ## 6. Inspect test coverage
 
 ```bash
@@ -177,8 +183,8 @@ was byte-identical across two native ARM64 runs and one emulated AMD64 run. On
 the eight-case OCR-sensitive panel, adjudications matched across architectures,
 while emitted fields were not row-identical on any of the eight. Exactly two
 AMD64 cases reached both the per-case timeout and retry-failure path and emitted
-conservative fallback rows. The ARM64 fee-reader panel was unchanged from the
-prior producer.
+conservative fallback rows. The ARM64 fee-reader panel reproduced its accepted
+behavior byte-for-byte.
 
 ## 7. Final identity check
 

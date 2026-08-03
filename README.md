@@ -8,9 +8,8 @@ The system is designed around source authority rather than OCR alone. It keeps
 visible and hidden PDF content separate, can reason over two physical views when
 a raw scan is viewer-authorized, binds evidence to the active case, and makes
 decisions through a deterministic policy. Expected-value analysis is used
-offline to assess proposed
-policy changes; it is not a production decision layer. Confidence is computed
-after adjudication.
+offline to assess proposed policy changes; it is not a production decision
+layer. Confidence is computed after adjudication.
 
 [`MEMO.md`](MEMO.md) explains the approach and trade-offs.
 [`docs/REVIEWER_GUIDE.md`](docs/REVIEWER_GUIDE.md) maps the public claims to
@@ -52,9 +51,9 @@ The required interface accepts two positional arguments,
 during an audit run, append `--ledger /output/evidence.jsonl` after the output
 path.
 
-The named commit is the prediction producer. Later public commits may update
-tests, audit tooling, and documentation; files copied into the scoring image are
-unchanged unless a newer producer is explicitly named.
+All release measurements and artifact identities below refer to the named
+prediction-producing commit. Documentation commits are recorded separately
+from the runtime source.
 
 ## Architecture
 
@@ -221,13 +220,15 @@ identities are recorded together here:
 
 | Constraint | Release measurement |
 | --- | --- |
+| Public training evaluation | `128.8990/150`: 66.32 classification, 45.3422 extraction, 17.2368 calibration; one catastrophic false approval |
 | Average runtime | `3.8372` s/PDF on native ARM64 |
-| Completed 5,000-case runtime | `19,186.18` s |
+| Completed 5,000-case runtime | `19,186.18` s (5 h 19 min 46 s) |
 | Runtime events | 82 fresh-process retries, all recovered (81 watchdog exits with missing primary state and one primary per-case timeout); zero terminal failures; governor level 0 throughout; no batch-deadline backfill |
 | Memory | 8 GiB hard limit enforced by Docker |
 | Local Docker image IDs | AMD64: 316,434,546 bytes, `sha256:f6447a9720c0ca52616d83f245ecb804d418b94bd503f8fe57fe551a3e36f95d`; ARM64: 286,493,358 bytes, `sha256:21515e59b31fecaed2eb9983527c0751079abc9c9d3c7711142214c523bdae3f` |
 | Model artifacts | 28,750,436 bytes total; 10,857,958 bytes largest |
 | Prediction file | `1,683,486` bytes; SHA-256 `4ff616d449d1931b461220b21b9c9ca2d1dba3bb82b6e3c021bf659b8f2822be` |
+| Submission validity | 5,000 valid rows; 0 missing |
 | Prediction-producing source | `4313d28b34abc4cef4c89586060f4d3d34848c88` |
 | Source/runtime binding | Full native-ARM64 manifest binding passed |
 
@@ -238,8 +239,8 @@ natively on Apple silicon. On an eight-case OCR-sensitive panel, adjudications
 matched across architectures, while emitted fields were not row-identical on
 any of the eight. Exactly two emulated AMD64 cases reached both the per-case
 timeout and retry-failure path and emitted conservative fallback rows. The
-ARM64 fee-reader panel was unchanged from the prior producer. No full AMD64
-throughput or cross-platform row-identity claim is made.
+ARM64 fee-reader panel reproduced its accepted behavior byte-for-byte. No full
+AMD64 throughput or cross-platform row-identity claim is made.
 
 ## Repository map
 
